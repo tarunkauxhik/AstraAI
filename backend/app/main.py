@@ -1,11 +1,18 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import uuid4
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, HTTPException, Request
+from pydantic import BaseModel, StringConstraints
 
 from app.config import get_settings
+from app.graph import build_graph
+from app.llm import LLMClient, LLMError, LLMTimeoutError
+from app.state import GraphContext, Language, Requirements
+
+logger = logging.getLogger(__name__)
 
 
 class HealthResponse(BaseModel):
@@ -13,15 +20,51 @@ class HealthResponse(BaseModel):
     service: str
 
 
+class RunRequest(BaseModel):
+    task: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)
+    ]
+    language: Language
+
+
+class RunResponse(BaseModel):
+    run_id: str
+    requirements: Requirements
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    get_settings()  # Fail fast on missing or invalid configuration.
+    # One shared client per process; fails fast on missing or invalid configuration.
+    app.state.llm = LLMClient(get_settings())
     yield
+    await app.state.llm.close()
 
 
 app = FastAPI(title="AstraAi", lifespan=lifespan)
+graph = build_graph()
+
+
+def get_llm(request: Request) -> LLMClient:
+    return request.app.state.llm
 
 
 @app.get("/health")
 async def health() -> HealthResponse:
     return HealthResponse(status="ok", service="astraai")
+
+
+@app.post("/runs")
+async def create_run(
+    run: RunRequest, llm: Annotated[LLMClient, Depends(get_llm)]
+) -> RunResponse:
+    run_id = str(uuid4())
+    try:
+        state = await graph.ainvoke(
+            {"run_id": run_id, "task": run.task, "language": run.language},
+            context=GraphContext(llm=llm),
+        )
+    except LLMError as exc:
+        logger.warning("Run %s failed: %s", run_id, exc)
+        status_code = 504 if isinstance(exc, LLMTimeoutError) else 502
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    return RunResponse(run_id=run_id, requirements=state["requirements"])

@@ -1,19 +1,13 @@
-from typing import Any
-
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.state import AgentState
-
-
-def placeholder(state: AgentState) -> dict[str, Any]:
-    """Pass-through node so the graph compiles; replaced once real nodes exist."""
-    return {}
+from app.nodes.analyze_task import analyze_task
+from app.state import AgentState, GraphContext
 
 
 def build_graph() -> CompiledStateGraph:
-    builder = StateGraph(AgentState)
-    builder.add_node("placeholder", placeholder)
-    builder.add_edge(START, "placeholder")
-    builder.add_edge("placeholder", END)
+    builder = StateGraph(AgentState, context_schema=GraphContext)
+    builder.add_node("analyze_task", analyze_task)
+    builder.add_edge(START, "analyze_task")
+    builder.add_edge("analyze_task", END)
     return builder.compile()

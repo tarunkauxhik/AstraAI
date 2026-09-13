@@ -1,0 +1,12 @@
+services:
+  api:
+    build: ./backend
+    env_file: ./backend/.env
+    ports:
+      - "127.0.0.1:8000:8000"
+    develop:
+      watch:
+        - action: rebuild
+          path: ./backend/app
+        - action: rebuild
+          path: ./backend/uv.lock

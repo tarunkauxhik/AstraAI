@@ -1,22 +1,24 @@
+import asyncio
+
 from app.graph import build_graph
-from app.state import AgentState
+from app.state import GraphContext, Requirements
+from tests.fake_llm import VALID_REQUIREMENTS, VALID_REQUIREMENTS_JSON, fake_llm
 
 
-def test_graph_compiles_with_expected_nodes() -> None:
-    graph = build_graph()
+def test_graph_topology() -> None:
+    graph = build_graph().get_graph()
 
-    assert set(graph.get_graph().nodes) == {"__start__", "placeholder", "__end__"}
-
-
-def test_graph_invocation_returns_state() -> None:
-    state: AgentState = {
-        "run_id": "run-1",
-        "task": "Reverse a string.",
-        "language": "python",
-        "max_attempts": 3,
-        "attempt_count": 0,
-        "status": "pending",
-        "errors": [],
+    assert set(graph.nodes) == {"__start__", "analyze_task", "__end__"}
+    assert {(edge.source, edge.target) for edge in graph.edges} == {
+        ("__start__", "analyze_task"),
+        ("analyze_task", "__end__"),
     }
 
-    assert build_graph().invoke(state) == state
+
+def test_graph_execution_stores_requirements() -> None:
+    context = GraphContext(llm=fake_llm(VALID_REQUIREMENTS_JSON))
+    initial = {"run_id": "run-1", "task": "Reverse a string.", "language": "python"}
+
+    state = asyncio.run(build_graph().ainvoke(initial, context=context))
+
+    assert state == {**initial, "requirements": Requirements(**VALID_REQUIREMENTS)}

@@ -15,7 +15,9 @@ def test_settings_load_from_environment() -> None:
     assert "test-key" not in repr(settings)
 
 
-def test_settings_load_from_dotenv_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_settings_load_from_dotenv_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"):
         monkeypatch.delenv(name)
     env_file = tmp_path / ".env"
@@ -31,10 +33,28 @@ def test_settings_load_from_dotenv_file(tmp_path: Path, monkeypatch: pytest.Monk
 
 @pytest.mark.parametrize(
     ("name", "value"),
-    [("OPENAI_BASE_URL", "not-a-url"), ("OPENAI_API_KEY", ""), ("OPENAI_MODEL", "")],
+    [
+        ("OPENAI_BASE_URL", "not-a-url"),
+        ("OPENAI_API_KEY", ""),
+        ("OPENAI_MODEL", ""),
+        ("LLM_TIMEOUT_SECONDS", "0"),
+    ],
 )
-def test_settings_reject_invalid_values(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
+def test_settings_reject_invalid_values(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
     monkeypatch.setenv(name, value)
 
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_settings_errors_do_not_echo_the_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_MODEL")
+
+    with pytest.raises(ValidationError) as error:
+        Settings()
+
+    assert "test-key" not in str(error.value)
