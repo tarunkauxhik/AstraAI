@@ -13,3 +13,5 @@ def llm_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("OPENAI_BASE_URL", "http://llm.test/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.delenv("LLM_MAX_ATTEMPTS", raising=False)
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_SECONDS", "0")

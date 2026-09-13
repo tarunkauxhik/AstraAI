@@ -9,9 +9,11 @@ from pydantic import ValidationError
 
 from app.main import app, get_llm
 from tests.fake_llm import (
+    VALID_GENERATED_TESTS,
     VALID_REQUIREMENTS,
     VALID_REQUIREMENTS_JSON,
-    Handler,
+    WORKFLOW_REPLIES,
+    Reply,
     fake_llm,
     timeout,
 )
@@ -20,10 +22,10 @@ VALID_RUN = {"task": "Reverse a string.", "language": "cpp"}
 
 
 @pytest.fixture
-def client_with_llm() -> Iterator[Callable[[str | Handler], TestClient]]:
-    """TestClient whose runs use a fake LLM replying with the given content or handler."""
+def client_with_llm() -> Iterator[Callable[[Reply], TestClient]]:
+    """TestClient whose runs use a fake LLM answering with the given reply."""
 
-    def make(reply: str | Handler) -> TestClient:
+    def make(reply: Reply) -> TestClient:
         app.dependency_overrides[get_llm] = lambda: fake_llm(reply)
         return TestClient(app)
 
@@ -46,16 +48,17 @@ def test_startup_fails_without_llm_config(monkeypatch: pytest.MonkeyPatch) -> No
         pass
 
 
-def test_create_run_returns_requirements(
-    client_with_llm: Callable[[str | Handler], TestClient],
+def test_create_run_returns_requirements_and_generated_tests(
+    client_with_llm: Callable[[Reply], TestClient],
 ) -> None:
-    with client_with_llm(VALID_REQUIREMENTS_JSON) as client:
+    with client_with_llm(WORKFLOW_REPLIES) as client:
         response = client.post("/runs", json=VALID_RUN)
 
     assert response.status_code == 200
     body = response.json()
     assert UUID(body["run_id"])
     assert body["requirements"] == VALID_REQUIREMENTS
+    assert body["generated_tests"] == VALID_GENERATED_TESTS
 
 
 @pytest.mark.parametrize(
@@ -73,9 +76,9 @@ def test_create_run_returns_requirements(
     ],
 )
 def test_create_run_rejects_invalid_request(
-    client_with_llm: Callable[[str | Handler], TestClient], payload: dict[str, Any]
+    client_with_llm: Callable[[Reply], TestClient], payload: dict[str, Any]
 ) -> None:
-    with client_with_llm(VALID_REQUIREMENTS_JSON) as client:
+    with client_with_llm(WORKFLOW_REPLIES) as client:
         response = client.post("/runs", json=payload)
 
     assert response.status_code == 422
@@ -88,7 +91,13 @@ def test_create_run_rejects_invalid_request(
             "not json",
             502,
             "LLM returned invalid structured output",
-            id="invalid-output",
+            id="invalid-requirements",
+        ),
+        pytest.param(
+            {"Requirements": VALID_REQUIREMENTS_JSON, "GeneratedTests": "not json"},
+            502,
+            "LLM returned invalid structured output",
+            id="invalid-generated-tests",
         ),
         pytest.param(
             lambda request: httpx2.Response(500),
@@ -100,8 +109,8 @@ def test_create_run_rejects_invalid_request(
     ],
 )
 def test_create_run_maps_llm_errors(
-    client_with_llm: Callable[[str | Handler], TestClient],
-    reply: str | Handler,
+    client_with_llm: Callable[[Reply], TestClient],
+    reply: Reply,
     status_code: int,
     detail: str,
 ) -> None:

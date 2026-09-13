@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr = Field(min_length=1)
     openai_model: str = Field(min_length=1)
     llm_timeout_seconds: float = Field(default=120, gt=0)
+    llm_max_attempts: int = Field(default=2, ge=1, le=5)
+    llm_retry_backoff_seconds: float = Field(default=1.0, ge=0, le=30)
 
 
 @lru_cache

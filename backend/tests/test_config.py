@@ -38,6 +38,9 @@ def test_settings_load_from_dotenv_file(
         ("OPENAI_API_KEY", ""),
         ("OPENAI_MODEL", ""),
         ("LLM_TIMEOUT_SECONDS", "0"),
+        ("LLM_MAX_ATTEMPTS", "0"),
+        ("LLM_MAX_ATTEMPTS", "6"),
+        ("LLM_RETRY_BACKOFF_SECONDS", "-1"),
     ],
 )
 def test_settings_reject_invalid_values(
@@ -47,6 +50,16 @@ def test_settings_reject_invalid_values(
 
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_retry_settings_default_to_two_attempts_with_one_second_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LLM_RETRY_BACKOFF_SECONDS")
+
+    settings = Settings()
+
+    assert (settings.llm_max_attempts, settings.llm_retry_backoff_seconds) == (2, 1.0)
 
 
 def test_settings_errors_do_not_echo_the_api_key(

@@ -22,7 +22,7 @@ pytestmark = [
 ]
 
 
-def test_analyze_task_with_real_llm() -> None:
+def test_workflow_with_real_llm() -> None:
     task = "Given an array of integers and a target, return indices of two numbers summing to it."
     context = GraphContext(llm=LLMClient(Settings()))
 
@@ -34,3 +34,4 @@ def test_analyze_task_with_real_llm() -> None:
     )
 
     assert state["requirements"].functional_requirements
+    assert state["generated_tests"].cases

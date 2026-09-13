@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.llm import LLMClient
 
 Handler = Callable[[httpx2.Request], httpx2.Response]
+Reply = str | dict[str, str] | Handler
 
 VALID_REQUIREMENTS = {
     "problem_summary": "Reverse a string.",
@@ -21,6 +22,45 @@ VALID_REQUIREMENTS = {
     "relevant_language_requirements": ["Function reverse(s: str) -> str."],
 }
 VALID_REQUIREMENTS_JSON = json.dumps(VALID_REQUIREMENTS)
+
+# A test plan as stored in state and returned by the API.
+VALID_GENERATED_TESTS = {
+    "interface": "Function reverse(s: string) -> string.",
+    "comparison": "Exact match.",
+    "cases": [
+        {
+            "name": "basic_word",
+            "category": "basic",
+            "description": "Reverses a typical word.",
+            "input": 's = "abc"',
+            "input_generator": "",
+            "expected_output": '"cba"',
+        },
+        {
+            "name": "empty_string",
+            "category": "empty_or_small",
+            "description": "An empty string stays empty.",
+            "input": 's = ""',
+            "input_generator": "",
+            "expected_output": '""',
+        },
+        {
+            "name": "single_character",
+            "category": "boundary",
+            "description": "A one-character string is its own reverse.",
+            "input": 's = "x"',
+            "input_generator": "",
+            "expected_output": '"x"',
+        },
+    ],
+}
+VALID_GENERATED_TESTS_JSON = json.dumps(VALID_GENERATED_TESTS)
+
+# Valid tool arguments for every node of the workflow, keyed by tool name.
+WORKFLOW_REPLIES = {
+    "Requirements": VALID_REQUIREMENTS_JSON,
+    "GeneratedTests": VALID_GENERATED_TESTS_JSON,
+}
 
 # Reasoning the live MiniMax gateway leaves in `content` next to a tool call.
 MINIMAX_THINK_CONTENT = "<think>\nThe user wants an analysis.\n</think>\n\n</think>"
@@ -95,10 +135,21 @@ def timeout(request: httpx2.Request) -> httpx2.Response:
     raise httpx2.ReadTimeout("timed out", request=request)
 
 
-def fake_llm(reply: str | Handler) -> LLMClient:
-    """LLMClient whose tool call carries `reply` as arguments, or delegates to a handler."""
-    handler = reply if callable(reply) else lambda request: tool_call(reply)
-    transport = httpx2.MockTransport(handler)
+def forced_tool(request: httpx2.Request) -> str:
+    return json.loads(request.content)["tool_choice"]["function"]["name"]
+
+
+def fake_llm(reply: Reply) -> LLMClient:
+    """LLMClient answering each forced tool call.
+
+    `reply` is the arguments for any tool, arguments keyed by tool name, or a handler.
+    """
+
+    def answer(request: httpx2.Request) -> httpx2.Response:
+        tool = forced_tool(request)
+        return tool_call(reply if isinstance(reply, str) else reply[tool], name=tool)
+
+    transport = httpx2.MockTransport(reply if callable(reply) else answer)
     return LLMClient(
         get_settings(), http_client=httpx2.AsyncClient(transport=transport)
     )

@@ -10,7 +10,7 @@ from pydantic import BaseModel, StringConstraints
 from app.config import get_settings
 from app.graph import build_graph
 from app.llm import LLMClient, LLMError, LLMTimeoutError
-from app.state import GraphContext, Language, Requirements
+from app.state import GeneratedTests, GraphContext, Language, Requirements
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ class RunRequest(BaseModel):
 class RunResponse(BaseModel):
     run_id: str
     requirements: Requirements
+    generated_tests: GeneratedTests
 
 
 @asynccontextmanager
@@ -67,4 +68,8 @@ async def create_run(
         logger.warning("Run %s failed: %s", run_id, exc)
         status_code = 504 if isinstance(exc, LLMTimeoutError) else 502
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-    return RunResponse(run_id=run_id, requirements=state["requirements"])
+    return RunResponse(
+        run_id=run_id,
+        requirements=state["requirements"],
+        generated_tests=state["generated_tests"],
+    )
