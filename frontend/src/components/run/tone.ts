@@ -1,3 +1,5 @@
+import { AlertTriangle, CheckCircle2, CircleSlash, Info, XCircle, type LucideIcon } from "lucide-react"
+
 import type { Tone } from "@/lib/labels"
 
 /** Tinted badge styling per tone. Always paired with a text label and usually an icon. */
@@ -24,4 +26,13 @@ export const TONE_ACCENT: Record<Tone, string> = {
   success: "border-l-success",
   warning: "border-l-warning",
   danger: "border-l-destructive",
+}
+
+/** Icon for an outcome of a given tone, so state never relies on color alone. */
+export const TONE_ICON: Record<Tone, LucideIcon> = {
+  neutral: CircleSlash,
+  info: Info,
+  success: CheckCircle2,
+  warning: AlertTriangle,
+  danger: XCircle,
 }

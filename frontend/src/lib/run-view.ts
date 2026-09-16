@@ -6,7 +6,7 @@ import type { ApiError } from "@/api/client"
 import { NETWORK_ERROR_DETAIL } from "@/api/client"
 import type { ApprovalStatus, ErrorCode, Run, RunStage } from "@/api/types"
 import { MAX_EXECUTION_RETRIES, MAX_REVISIONS } from "@/api/types"
-import { APPROVAL_STATUS_LABELS, describeError } from "@/lib/labels"
+import { APPROVAL_STATUS_LABELS, describeError, type Tone } from "@/lib/labels"
 
 // ---------------------------------------------------------------------------------------
 // Semantic state
@@ -113,6 +113,15 @@ export function criticFreshness(run: Run): Freshness | null {
   return stage === "executing" || stage === "reviewing" ? "stale" : "current"
 }
 
+/**
+ * The attempt a stored result belongs to: the current attempt, or the one before it while
+ * a newer attempt is in progress (or was in progress when the run stopped).
+ */
+export function evidenceAttempt(run: Run, freshness: Freshness): number {
+  const attempt = executionAttempt(run)
+  return freshness === "stale" ? attempt - 1 : attempt
+}
+
 /** A re-execution of unchanged code after a sandbox infrastructure error. */
 export function isRetryingExecution(run: Run): boolean {
   return (
@@ -133,6 +142,8 @@ export interface TimelineStep {
   label: string
   state: StepState
   detail: string | null
+  /** For a failed (stopped) step: how serious the stop is. A rejection is not an error. */
+  tone: Tone | null
 }
 
 const STEPS: readonly { id: StepId; label: string }[] = [
@@ -168,24 +179,25 @@ export function verifyActivity(run: Run): string | null {
   switch (evidenceStage(run)) {
     case "executing":
       return isRetryingExecution(run)
-        ? `Retrying execution (retry ${run.execution_retry_count} of ${MAX_EXECUTION_RETRIES})`
-        : `Executing attempt ${attempt}`
+        ? `Retrying attempt ${attempt} after a sandbox error`
+        : `Running attempt ${attempt}`
     case "reviewing":
       return `Reviewing attempt ${attempt}`
     case "revising_code":
-      return `Revising code (revision ${run.revision_count + 1} of ${MAX_REVISIONS})`
+      return `Repairing solution · revision ${run.revision_count + 1}/${MAX_REVISIONS}`
     case "revising_tests":
-      return `Revising tests (revision ${run.revision_count + 1} of ${MAX_REVISIONS})`
+      return `Repairing tests · revision ${run.revision_count + 1}/${MAX_REVISIONS}`
     default:
       return null
   }
 }
 
-function verifyCounters(run: Run): string {
+/** Server counters in compact form, e.g. "Attempt 2 · Revision 1/2". */
+export function verifyCounters(run: Run): string {
   const parts = [`Attempt ${executionAttempt(run)}`]
-  if (run.revision_count > 0) parts.push(`${run.revision_count}/${MAX_REVISIONS} revisions`)
+  if (run.revision_count > 0) parts.push(`Revision ${run.revision_count}/${MAX_REVISIONS}`)
   if (run.execution_retry_count > 0) {
-    parts.push(`${run.execution_retry_count}/${MAX_EXECUTION_RETRIES} retries`)
+    parts.push(`Retry ${run.execution_retry_count}/${MAX_EXECUTION_RETRIES}`)
   }
   return parts.join(" · ")
 }
@@ -212,7 +224,7 @@ export function timeline(run: Run): TimelineStep[] {
 
     let detail: string | null = null
     if (id === "verify" && (state !== "pending" || run.execution_result !== null)) {
-      const activity = state === "active" || state === "failed" ? verifyActivity(run) : null
+      const activity = state === "active" ? verifyActivity(run) : null
       detail = activity ?? verifyCounters(run)
     } else if (id === "approval") {
       detail = approvalDetail(run.approval_status)
@@ -221,7 +233,8 @@ export function timeline(run: Run): TimelineStep[] {
     } else if (id === "result" && failed) {
       detail = describeError(run.error).title
     }
-    return { id, label, state, detail }
+    const tone = state === "failed" ? describeError(run.error).tone : null
+    return { id, label, state, detail, tone }
   })
 }
 
@@ -268,6 +281,39 @@ export function pollInterval(
   else if (run.status === "waiting_for_approval") interval = POLL_MS.awaitingApproval
   else interval = POLL_MS.working
   return context.hidden ? Math.max(interval, POLL_MS.hidden) : interval
+}
+
+// ---------------------------------------------------------------------------------------
+// Approval countdown (display only: the server alone decides expiry)
+
+export interface Countdown {
+  remainingMs: number
+  /** The expiry time has been reached on the (skew-corrected) clock. Not "expired". */
+  reached: boolean
+  /** "9:41", or "1:02:03" for an hour or more. */
+  label: string
+  /** Share of the approval window left, 0–1, when the start time is known. */
+  fraction: number | null
+}
+
+export function approvalCountdown(
+  requestedAt: string | null,
+  expiresAt: string,
+  nowMs: number,
+): Countdown {
+  const end = Date.parse(expiresAt)
+  const remainingMs = Number.isNaN(end) ? 0 : Math.max(0, end - nowMs)
+  const totalSeconds = Math.ceil(remainingMs / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = String(totalSeconds % 60).padStart(2, "0")
+  const label =
+    hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`
+  const start = requestedAt === null ? Number.NaN : Date.parse(requestedAt)
+  const window = end - start
+  const fraction =
+    Number.isNaN(window) || window <= 0 ? null : Math.min(1, Math.max(0, remainingMs / window))
+  return { remainingMs, reached: remainingMs === 0, label, fraction }
 }
 
 // ---------------------------------------------------------------------------------------

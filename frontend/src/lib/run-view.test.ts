@@ -4,8 +4,10 @@ import { ApiError } from "@/api/client"
 import type { Run } from "@/api/types"
 import { describeError } from "@/lib/labels"
 import {
+  approvalCountdown,
   criticFreshness,
   describeApprovalError,
+  evidenceAttempt,
   executionAttempt,
   executionFreshness,
   isVerified,
@@ -16,6 +18,7 @@ import {
   showApprovalControls,
   timeline,
   verifyActivity,
+  verifyCounters,
 } from "@/lib/run-view"
 import {
   approvedThenFailedRun,
@@ -119,11 +122,11 @@ describe("execution attempts", () => {
   })
 
   it("describes the current verify activity", () => {
-    expect(verifyActivity(executingRun)).toBe("Executing attempt 1")
+    expect(verifyActivity(executingRun)).toBe("Running attempt 1")
     expect(verifyActivity(reviewingRun)).toBe("Reviewing attempt 1")
-    expect(verifyActivity(revisingRun)).toBe("Revising code (revision 1 of 2)")
-    expect(verifyActivity(reExecutingAfterRevisionRun)).toBe("Executing attempt 2")
-    expect(verifyActivity(retryingExecutionRun)).toBe("Retrying execution (retry 1 of 1)")
+    expect(verifyActivity(revisingRun)).toBe("Repairing solution · revision 1/2")
+    expect(verifyActivity(reExecutingAfterRevisionRun)).toBe("Running attempt 2")
+    expect(verifyActivity(retryingExecutionRun)).toBe("Retrying attempt 2 after a sandbox error")
   })
 })
 
@@ -183,7 +186,7 @@ describe("timeline", () => {
     })
     expect(states(revisingRun).verify).toBe("active")
     const verify = timeline(reExecutingAfterRevisionRun).find((step) => step.id === "verify")
-    expect(verify?.detail).toBe("Executing attempt 2")
+    expect(verify?.detail).toBe("Running attempt 2")
   })
 
   it("marks approval active while waiting and done once resuming", () => {
@@ -207,7 +210,7 @@ describe("timeline", () => {
     expect(states(rejectedRun)).toMatchObject({ verify: "done", approval: "failed", result: "failed" })
     expect(states(needsReviewRun)).toMatchObject({ verify: "failed", approval: "pending" })
     const result = timeline(rejectedRun).find((step) => step.id === "result")
-    expect(result?.detail).toBe("Rejected")
+    expect(result?.detail).toBe("Approval rejected")
   })
 
   it("marks only the result when the run failed before starting", () => {
@@ -219,7 +222,7 @@ describe("timeline", () => {
 
 describe("errors", () => {
   it("maps every known code and falls back safely", () => {
-    expect(describeError(rejectedRun.error).title).toBe("Rejected")
+    expect(describeError(rejectedRun.error).title).toBe("Approval rejected")
     expect(describeError(expiredRun.error).title).toBe("Approval expired")
     expect(describeError(sandboxUnavailableRun.error).category).toBe("infrastructure")
     expect(describeError({ code: "brand_new_code", message: "?", stage: "executing" }).title).toBe(
@@ -266,5 +269,70 @@ describe("describeApprovalError", () => {
     ).toContain("still waiting; try again in 30 seconds")
     expect(describeApprovalError(networkError())).toContain("whether your decision was recorded")
     expect(describeApprovalError(httpError(503))).toContain("couldn't be recorded")
+  })
+})
+
+describe("evidence attempts", () => {
+  it("attributes stale evidence to the previous attempt", () => {
+    expect(evidenceAttempt(reExecutingAfterRevisionRun, "stale")).toBe(1)
+    expect(evidenceAttempt(reExecutingAfterRevisionRun, "current")).toBe(2)
+    expect(evidenceAttempt(revisingRun, "current")).toBe(1)
+    expect(evidenceAttempt(retryingExecutionRun, "stale")).toBe(1)
+  })
+
+  it("summarizes server counters", () => {
+    expect(verifyCounters(executingRun)).toBe("Attempt 1")
+    expect(verifyCounters(reExecutingAfterRevisionRun)).toBe("Attempt 2 · Revision 1/2")
+    expect(verifyCounters(retryingExecutionRun)).toBe("Attempt 2 · Retry 1/1")
+  })
+})
+
+describe("timeline decision outcomes", () => {
+  function step(run: Run, id: string) {
+    return timeline(run).find((item) => item.id === id)
+  }
+
+  it("shows a rejection as a neutral stop at approval, not a verification failure", () => {
+    expect(step(rejectedRun, "verify")).toMatchObject({ state: "done" })
+    expect(step(rejectedRun, "approval")).toMatchObject({
+      state: "failed",
+      detail: "Rejected",
+      tone: "neutral",
+    })
+  })
+
+  it("shows an expiry as Approval → Expired", () => {
+    expect(step(expiredRun, "approval")).toMatchObject({ state: "failed", detail: "Expired", tone: "warning" })
+    expect(step(expiredRun, "result")?.detail).toBe("Approval expired")
+  })
+
+  it("keeps real failures serious", () => {
+    expect(step(timedOutDuringReExecutionRun, "verify")).toMatchObject({ state: "failed", tone: "danger" })
+    expect(step(sandboxUnavailableRun, "verify")).toMatchObject({ state: "failed", tone: "neutral" })
+    expect(step(executingRun, "verify")?.tone).toBeNull()
+  })
+})
+
+describe("approvalCountdown", () => {
+  const requested = "2026-09-16T11:27:00.000Z"
+  const expires = "2026-09-16T11:37:00.000Z"
+  const at = (iso: string) => approvalCountdown(requested, expires, Date.parse(iso))
+
+  it("counts down against the given clock", () => {
+    expect(at("2026-09-16T11:27:00.000Z")).toMatchObject({ label: "10:00", reached: false, fraction: 1 })
+    expect(at("2026-09-16T11:36:30.400Z")).toMatchObject({ label: "0:30", reached: false })
+    expect(at("2026-09-16T11:32:00.000Z").fraction).toBeCloseTo(0.5)
+  })
+
+  it("reaches zero without going negative", () => {
+    expect(at("2026-09-16T11:37:00.000Z")).toMatchObject({ remainingMs: 0, reached: true, label: "0:00" })
+    expect(at("2026-09-16T12:00:00.000Z")).toMatchObject({ remainingMs: 0, reached: true })
+  })
+
+  it("formats long windows with hours", () => {
+    expect(approvalCountdown(null, expires, Date.parse("2026-09-16T09:36:59.000Z"))).toMatchObject({
+      label: "2:00:01",
+      fraction: null,
+    })
   })
 })

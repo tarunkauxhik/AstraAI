@@ -42,6 +42,35 @@ export const STAGE_LABELS: Record<RunStage, string> = {
   failed: "Failed",
 }
 
+/** What AstraAi is doing, phrased for the active run. */
+export const STAGE_ACTIVITY: Record<RunStage, string> = {
+  queued: "Queued",
+  analyzing: "Analyzing task",
+  generating_tests: "Designing tests",
+  generating_code: "Generating solution",
+  executing: "Running verification",
+  reviewing: "Reviewing result",
+  revising_code: "Repairing solution",
+  revising_tests: "Repairing tests",
+  waiting_for_approval: "Verified — waiting for approval",
+  resuming: "Finishing approved run",
+  completed: "Completed",
+  failed: "Stopped",
+}
+
+/** One factual sentence about each working stage. No progress or timing is implied. */
+export const STAGE_DESCRIPTION: Partial<Record<RunStage, string>> = {
+  queued: "Waiting for a free worker. Runs execute one at a time.",
+  analyzing: "Reading the task and extracting requirements, edge cases and constraints.",
+  generating_tests: "Designing a test plan from the requirements.",
+  generating_code: "Writing the solution and an executable test program.",
+  executing: "Running the generated tests in an isolated sandbox.",
+  reviewing: "Checking the execution result against the requirements.",
+  revising_code: "The review found an implementation issue. Only the solution is being rewritten.",
+  revising_tests: "The review found a test issue. Only the test program is being rewritten.",
+  resuming: "Your approval was recorded. AstraAi is completing the run.",
+}
+
 export const EXECUTION_STATUS: Record<ExecutionStatus, { label: string; tone: Tone }> = {
   passed: { label: "Passed", tone: "success" },
   failed: { label: "Failed", tone: "danger" },
@@ -75,11 +104,20 @@ export const VERDICTS: Record<CriticVerdict, { label: string; tone: Tone }> = {
 }
 
 export const ACTION_LABELS: Record<RecommendedAction, string> = {
-  accept: "Accept",
-  revise_code: "Revise the code",
-  revise_tests: "Revise the tests",
+  accept: "Accept the solution",
+  revise_code: "Repair the solution",
+  revise_tests: "Repair the tests",
   retry_execution: "Retry execution",
-  needs_human_review: "Needs human review",
+  needs_human_review: "Hand over for human review",
+}
+
+/** What a verdict means, in one short line. */
+export const VERDICT_MEANING: Record<CriticVerdict, string> = {
+  pass: "The solution meets the requirements.",
+  code_failure: "The solution needs a fix.",
+  test_failure: "A test contradicts the requirements.",
+  execution_failure: "The run produced no trustworthy evidence about the code.",
+  ambiguous: "The evidence can't settle whether the code or the tests are wrong.",
 }
 
 export const APPROVAL_STATUS_LABELS: Record<ApprovalStatus, string> = {
@@ -107,55 +145,59 @@ export interface ErrorPresentation {
 
 export const ERROR_PRESENTATION: Record<KnownErrorCode, ErrorPresentation> = {
   approval_rejected: {
-    title: "Rejected",
-    description: "You rejected the verified result, so it was not accepted.",
+    title: "Approval rejected",
+    description:
+      "You rejected the verified solution, so it was not accepted. This was your decision, not a verification failure.",
     tone: "neutral",
     category: "decision",
   },
   approval_expired: {
     title: "Approval expired",
-    description: "No decision was received before the approval window closed.",
+    description:
+      "No decision was received before the approval window closed, so the run ended without an accepted solution.",
     tone: "warning",
     category: "decision",
   },
   needs_human_review: {
     title: "Needs human review",
-    description: "AstraAi couldn't establish that the solution is correct.",
+    description: "AstraAi couldn't establish that the solution is correct from the evidence it had.",
     tone: "warning",
     category: "review",
   },
   revision_budget_exhausted: {
     title: "Revision budget used",
-    description: `AstraAi used all ${MAX_REVISIONS} revisions without reaching a verified solution.`,
+    description: `AstraAi used all ${MAX_REVISIONS} repair attempts without reaching a verified solution.`,
     tone: "warning",
     category: "review",
   },
   retry_budget_exhausted: {
-    title: "Execution retries used",
-    description: "The code couldn't be executed, even after retrying.",
+    title: "Sandbox unavailable",
+    description:
+      "Code verification could not continue because the execution environment was unavailable, even after retrying.",
     tone: "neutral",
     category: "infrastructure",
   },
   sandbox_unavailable: {
     title: "Sandbox unavailable",
-    description: "The code couldn't be executed because the sandbox is unavailable.",
+    description:
+      "Code verification could not continue because the execution environment was unavailable.",
     tone: "neutral",
     category: "infrastructure",
   },
   run_timeout: {
     title: "Run timed out",
-    description: "Active work took longer than the run time limit.",
+    description: "Active work took longer than the run time limit, so the run was stopped.",
     tone: "danger",
     category: "timeout",
   },
   llm_timeout: {
-    title: "Model timed out",
+    title: "Model unavailable",
     description: "The language model took too long to respond.",
     tone: "danger",
     category: "model",
   },
   llm_failed: {
-    title: "Model request failed",
+    title: "Model unavailable",
     description: "The language model request failed or returned unusable output.",
     tone: "danger",
     category: "model",
@@ -167,14 +209,14 @@ export const ERROR_PRESENTATION: Record<KnownErrorCode, ErrorPresentation> = {
     category: "interrupted",
   },
   invalid_step_output: {
-    title: "Unusable step output",
+    title: "Internal failure",
     description: "A step produced output that the next step couldn't use.",
     tone: "danger",
     category: "internal",
   },
   internal_error: {
-    title: "Internal error",
-    description: "The run failed because of an internal error.",
+    title: "Internal failure",
+    description: "The run stopped because of an internal error.",
     tone: "danger",
     category: "internal",
   },

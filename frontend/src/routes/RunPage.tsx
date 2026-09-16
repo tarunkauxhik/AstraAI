@@ -18,8 +18,19 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useRun } from "@/hooks/useRun"
 import { formatDateTime, shortId } from "@/lib/format"
-import { LANGUAGE_LABELS, STAGE_LABELS, STATUS_LABELS } from "@/lib/labels"
+import { describeError, LANGUAGE_LABELS, STAGE_ACTIVITY, STAGE_LABELS, STATUS_LABELS } from "@/lib/labels"
 import { pageState, showApprovalControls } from "@/lib/run-view"
+
+/** Status and stage in words; a stopped run is described by its outcome, not "Failed". */
+function describeProgress(run: Run): { status: string; stage: string } {
+  if (run.status === "failed") {
+    return {
+      status: describeError(run.error).title,
+      stage: run.error ? `Stopped during ${STAGE_LABELS[run.error.stage].toLowerCase()}` : "Stopped",
+    }
+  }
+  return { status: STATUS_LABELS[run.status], stage: STAGE_ACTIVITY[run.stage] }
+}
 
 function CopyRunId({ runId }: { runId: string }) {
   const [copied, setCopied] = useState(false)
@@ -114,7 +125,7 @@ function Workspace({ run, connectionError }: { run: Run; connectionError: ApiErr
         "lg:grid-cols-[minmax(0,1fr)_340px] lg:[grid-template-areas:'banner_banner'_'timeline_timeline'_'artifacts_status'_'artifacts_evidence'] " +
         "xl:grid-cols-[220px_minmax(0,1fr)_380px] xl:[grid-template-areas:'banner_banner_banner'_'timeline_artifacts_status'_'timeline_artifacts_evidence'] " +
         "lg:grid-rows-[auto_auto_auto_1fr] xl:grid-rows-[auto_auto_1fr] " +
-        (waiting ? "pb-24 md:pb-4" : "")
+        (waiting ? "pb-40 md:pb-4" : "")
       }
     >
       <div className="[grid-area:banner] empty:hidden">
@@ -141,11 +152,11 @@ function Workspace({ run, connectionError }: { run: Run; connectionError: ApiErr
           <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-1 border-t pt-3 text-xs">
             <div className="flex gap-1.5">
               <dt className="text-muted-foreground">Status</dt>
-              <dd>{STATUS_LABELS[run.status]}</dd>
+              <dd>{describeProgress(run).status}</dd>
             </div>
             <div className="flex gap-1.5">
               <dt className="text-muted-foreground">Stage</dt>
-              <dd>{STAGE_LABELS[run.stage]}</dd>
+              <dd>{describeProgress(run).stage}</dd>
             </div>
             <div className="flex gap-1.5">
               <dt className="text-muted-foreground">Revisions</dt>
@@ -183,7 +194,7 @@ export function RunPage() {
   const run = state.kind === "run" ? state.run : undefined
 
   useEffect(() => {
-    document.title = run ? `${STATUS_LABELS[run.status]} · ${shortId(run.run_id)} · AstraAi` : "AstraAi"
+    document.title = run ? `${describeProgress(run).status} · ${shortId(run.run_id)} · AstraAi` : "AstraAi"
   }, [run])
 
   return (
@@ -191,7 +202,7 @@ export function RunPage() {
       <TopBar run={run} />
       {/* One polite announcement per status/stage change, not per poll. */}
       <p className="sr-only" aria-live="polite">
-        {run ? `${STATUS_LABELS[run.status]}: ${STAGE_LABELS[run.stage]}` : ""}
+        {run ? `${describeProgress(run).status}: ${describeProgress(run).stage}` : ""}
       </p>
 
       {state.kind === "loading" && (

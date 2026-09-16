@@ -1,47 +1,28 @@
-import { useEffect, useState } from "react"
-import { Check, Copy } from "lucide-react"
-
-import { Button } from "@/components/ui/button"
+import { CopyButton } from "@/components/CopyButton"
 
 interface CodeViewerProps {
   code: string
   /** Accessible name and visible caption, e.g. "solution.py". */
   label: string
+  /** Optional extra caption content, e.g. a language badge. */
+  meta?: React.ReactNode
 }
 
 /** Read-only code with line numbers. Always plain text: nothing is rendered as HTML. */
-export function CodeViewer({ code, label }: CodeViewerProps) {
-  const [copied, setCopied] = useState(false)
+export function CodeViewer({ code, label, meta }: CodeViewerProps) {
   const lines = code.replace(/\n$/, "").split("\n")
-
-  useEffect(() => {
-    if (!copied) return
-    const timer = window.setTimeout(() => setCopied(false), 1500)
-    return () => window.clearTimeout(timer)
-  }, [copied])
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(code)
-      setCopied(true)
-    } catch {
-      // Clipboard unavailable (insecure context or denied): the code stays selectable.
-    }
-  }
 
   return (
     <figure className="overflow-hidden rounded-lg border bg-[oklch(0.135_0.004_250)]">
-      <figcaption className="flex items-center justify-between border-b px-3 py-1.5">
-        <span className="font-mono text-xs text-muted-foreground">{label}</span>
-        <Button
-          variant="ghost"
-          size="xs"
-          onClick={copy}
-          aria-label={copied ? `Copied ${label}` : `Copy ${label}`}
-        >
-          {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-          {copied ? "Copied" : "Copy"}
-        </Button>
+      <figcaption className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-mono text-xs text-muted-foreground">{label}</span>
+          {meta}
+          <span className="text-xs text-muted-foreground/70">
+            {lines.length} {lines.length === 1 ? "line" : "lines"}
+          </span>
+        </span>
+        <CopyButton text={code} label={label} />
       </figcaption>
       <div
         className="overflow-x-auto focus-visible:outline-offset-[-2px]"

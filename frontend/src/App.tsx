@@ -3,7 +3,6 @@ import { createBrowserRouter, Link, RouterProvider } from "react-router"
 
 import { Brand } from "@/components/Brand"
 import { Button } from "@/components/ui/button"
-import { Toaster } from "@/components/ui/sonner"
 import { NewRunPage } from "@/routes/NewRunPage"
 import { RunPage } from "@/routes/RunPage"
 
@@ -43,7 +42,6 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
-      <Toaster position="top-center" />
     </QueryClientProvider>
   )
 }

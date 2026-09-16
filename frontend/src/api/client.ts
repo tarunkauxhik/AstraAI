@@ -5,6 +5,7 @@ import type {
   RunAccepted,
   RunRequest,
 } from "@/api/types"
+import { recordServerDate } from "@/lib/server-clock"
 
 /** Same-origin prefix. In development Vite proxies it to FastAPI (vite.config.ts). */
 const API_BASE = "/api"
@@ -114,6 +115,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (cause instanceof DOMException && cause.name === "AbortError") throw cause
     throw new ApiError({ kind: "network", status: 0, detail: NETWORK_ERROR_DETAIL })
   }
+  recordServerDate(response.headers.get("date"))
   if (!response.ok) throw await toApiError(response)
   return (await response.json()) as T
 }
