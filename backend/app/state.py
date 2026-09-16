@@ -183,6 +183,32 @@ class CriticResult(BaseModel):
         return self
 
 
+class RevisedSolution(BaseModel):
+    """A corrected solution. Tests, the test plan and requirements are not part of it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    solution_code: str = Field(
+        min_length=1,
+        description="The complete corrected solution: implementation only, no markdown fences.",
+    )
+    explanation: str = Field(description="Short note on what changed and why.")
+
+
+class RevisedTests(BaseModel):
+    """Corrected test code. The solution, test plan and requirements are not part of it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    test_code: str = Field(
+        min_length=1,
+        description="The complete corrected test program, no markdown fences.",
+    )
+    explanation: str = Field(
+        description="Short note on what changed and why, grounded in the requirements."
+    )
+
+
 class AgentState(TypedDict):
     """State shared by every node of an AstraAi run."""
 
@@ -194,8 +220,9 @@ class AgentState(TypedDict):
     generated_code: NotRequired[GeneratedCode]
     execution_result: NotRequired[ExecutionResult]
     critic_result: NotRequired[CriticResult]
-    attempt_count: NotRequired[int]
-    max_attempts: NotRequired[int]
+    # Bounded repair-loop counters; absent means 0.
+    revision_count: NotRequired[int]
+    execution_retry_count: NotRequired[int]
     status: NotRequired[Literal["pending", "running", "succeeded", "failed"]]
     errors: NotRequired[list[str]]
 

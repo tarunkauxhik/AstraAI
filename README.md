@@ -2,10 +2,14 @@
 
 AI software development agent. LangGraph orchestrates each run; FastAPI serves it.
 
-Status: early backend. A run analyzes a coding task into structured requirements, designs a language-neutral test plan, writes the solution and its tests, runs them in a locked-down Docker container, then has a critic judge the result:
+Status: early backend. A run analyzes a coding task into structured requirements, designs a language-neutral test plan, writes the solution and its tests, runs them in a locked-down Docker container, has a critic judge the result, and repairs the code or tests within a small budget:
 
 ```
-START → analyze_task → generate_tests → generate_code → execute_sandbox → critic → END
+START → analyze_task → generate_tests → generate_code → execute_sandbox → critic
+critic → END                                  (accept, human review, budget exhausted)
+critic → revise_code     → execute_sandbox   (at most 2 revisions in total)
+critic → revise_tests    → execute_sandbox
+critic → retry_execution → execute_sandbox   (at most 1 retry, infrastructure errors only)
 ```
 
 ## Layout
@@ -27,6 +31,10 @@ backend/
       generate_code.py   + test plan → GeneratedCode (solution and test code)
       execute_sandbox.py + sandbox → ExecutionResult (runs the tests)
       critic.py          everything so far → CriticResult (verdict, no code)
+      revise_code.py     diagnosis → RevisedSolution (solution code only)
+      revise_tests.py    diagnosis → RevisedTests (test code only)
+      retry_execution.py counts one re-execution after an infrastructure error
+    repair.py            revision/retry budgets and the router after the critic
     sandbox/
       executor.py        SandboxExecutor protocol and per-language layout
       docker.py          ephemeral container runner
@@ -99,12 +107,15 @@ Supported languages: `python`, `cpp`.
 
 A run has `status` (`queued`, `running`, `completed`, `failed`) and a `stage` that moves in
 this order: `queued` → `analyzing` → `generating_tests` → `generating_code` → `executing` →
-`reviewing` → `completed`, or `failed` from any step. `requirements`, `generated_tests`, `generated_code`
+`reviewing` → `completed`, or `failed` from any step. A repair adds `revising_code` or
+`revising_tests` followed by `executing` and `reviewing` again. `requirements`, `generated_tests`, `generated_code`
 `execution_result` and `critic_result` fill in as each step finishes and are kept if a later step fails.
 A failed run carries a safe `error` of `{code, message, stage}`, never internal details.
 
-Failing generated tests still produce a `completed` run: the answer is in
-`execution_result.status`. A run only fails when a step could not do its job.
+A run is `completed` only when the critic accepts the final code. Otherwise it is `failed`
+with `error.code` `needs_human_review`, `revision_budget_exhausted` or `sandbox_unavailable`,
+keeping the latest code, execution result and critic result. `revision_count` and
+`execution_retry_count` show how much of each budget a run used.
 
 One full run executes at a time (`RUN_MAX_ACTIVE_RUNS`), up to `RUN_MAX_QUEUED_RUNS` wait,
 and the newest `RUN_MAX_RETAINED_RUNS` finished runs are kept in memory.
@@ -149,6 +160,22 @@ wrong. Compile errors, runtime errors and failed assertions go to the model.
 The model's verdict is then checked against the evidence. A `pass` only stands when the tests
 passed; otherwise it becomes `ambiguous` with `needs_human_review`. An invalid answer from the
 model becomes the same safe verdict rather than being trusted or failing the run.
+
+## Repair loop
+
+After each execution the critic's reconciled `recommended_action` decides what happens next
+(`app/repair.py`). The verdict alone never routes.
+
+| Action | Next step | Budget |
+| ------ | --------- | ------ |
+| `accept` | end, completed | - |
+| `needs_human_review` | end, needs review | - |
+| `revise_code` | `revise_code` rewrites **only** the solution, then re-executes | 2 revisions per run, shared with tests |
+| `revise_tests` | `revise_tests` rewrites **only** the test code, then re-executes | same budget |
+| `retry_execution` | re-runs the same code after an infrastructure error | 1 retry per run |
+
+When a budget is spent the run ends safely instead of looping. Each execution gets exactly one
+critic review, and the critic always judges the code that actually ran.
 
 ## Sandbox
 

@@ -15,6 +15,7 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ConfigDict
 
 from app.llm import LLMError, LLMTimeoutError
+from app.repair import route_repair
 from app.state import (
     CriticResult,
     ExecutionResult,
@@ -35,6 +36,8 @@ RunStage = Literal[
     "generating_code",
     "executing",
     "reviewing",
+    "revising_code",
+    "revising_tests",
     "completed",
     "failed",
 ]
@@ -46,6 +49,10 @@ NODE_STAGES: dict[str, RunStage] = {
     "generate_code": "generating_code",
     "execute_sandbox": "executing",
     "critic": "reviewing",
+    "revise_code": "revising_code",
+    "revise_tests": "revising_tests",
+    # A retry re-runs the same code at once, so it reads as executing.
+    "retry_execution": "executing",
 }
 RESULT_FIELDS = frozenset(
     {
@@ -54,6 +61,8 @@ RESULT_FIELDS = frozenset(
         "generated_code",
         "execution_result",
         "critic_result",
+        "revision_count",
+        "execution_retry_count",
     }
 )
 
@@ -85,6 +94,8 @@ class Run(BaseModel):
     generated_code: GeneratedCode | None = None
     execution_result: ExecutionResult | None = None
     critic_result: CriticResult | None = None
+    revision_count: int = 0
+    execution_retry_count: int = 0
     error: RunError | None = None
 
 
@@ -100,6 +111,14 @@ class RunManagerStoppedError(Exception):
 SHUTDOWN_GRACE_SECONDS = 30
 RUN_TIMEOUT_MESSAGE = "The run took longer than the allowed time and was stopped."
 SHUTDOWN_MESSAGE = "The run was stopped because the service is shutting down."
+# Safe explanations for runs that end without a verified solution, by repair decision.
+UNRESOLVED_MESSAGES = {
+    "needs_human_review": "The agent could not confirm a correct solution, so the result "
+    "needs human review.",
+    "revision_budget_exhausted": "The agent used all of its revision attempts without "
+    "reaching a verified solution.",
+    "retry_budget_exhausted": "The code could not be executed, even after retrying.",
+}
 
 
 def utc_now() -> datetime:
@@ -297,7 +316,27 @@ class RunManager:
                 ),
             )
             return
-        self._update(run_id, status="completed", stage="completed")
+        run = self._runs[run_id]
+        decision = route_repair(
+            run.critic_result, run.revision_count, run.execution_retry_count
+        )
+        if decision == "accept":
+            self._update(run_id, status="completed", stage="completed")
+            return
+        # The graph stopped without a verified solution: never report that as success.
+        logger.warning("Run %s ended without a verified solution: %s", run_id, decision)
+        self._update(
+            run_id,
+            status="failed",
+            stage="failed",
+            error=RunError(
+                code=decision,
+                message=UNRESOLVED_MESSAGES.get(
+                    decision, UNRESOLVED_MESSAGES["needs_human_review"]
+                ),
+                stage="reviewing",
+            ),
+        )
 
     def _forget_old_runs(self) -> None:
         """Keep memory bounded: drop the oldest finished runs beyond the retention limit."""

@@ -229,3 +229,58 @@ def fake_llm(reply: Reply) -> LLMClient:
     return LLMClient(
         get_settings(), http_client=httpx2.AsyncClient(transport=transport)
     )
+
+
+# Critic verdicts that send the graph into a repair.
+CODE_FAILURE_VERDICT = {
+    "verdict": "code_failure",
+    "reason": "reverse returns its input unchanged.",
+    "code_issue": "The characters are never reversed.",
+    "test_issue": "",
+    "recommended_action": "revise_code",
+}
+TEST_FAILURE_VERDICT = {
+    "verdict": "test_failure",
+    "reason": "basic_word expects the input back, but the requirements say reverse.",
+    "code_issue": "",
+    "test_issue": "basic_word should expect cba, not abc.",
+    "recommended_action": "revise_tests",
+}
+
+# Revision replies. Each changes only the artifact its node is allowed to change.
+REVISED_SOLUTION = {
+    "solution_code": "def reverse(s: str) -> str:\n    return ''.join(reversed(s))\n",
+    "explanation": "Build the reversed string explicitly.",
+}
+REVISED_TESTS = {
+    "test_code": VALID_PYTHON_CODE["test_code"]
+    + "# Expectations re-checked against the requirements.\n",
+    "explanation": "basic_word now expects cba, as the requirements say.",
+}
+
+
+class ScriptedReplies:
+    """LLM handler answering each tool with its replies in order, repeating the last one.
+
+    Replies may be JSON strings or dicts. `calls` records every requested tool in order,
+    and `prompts` the matching user prompts.
+    """
+
+    def __init__(self, replies: dict[str, Any]) -> None:
+        self._replies = {
+            tool: [
+                reply if isinstance(reply, str) else json.dumps(reply)
+                for reply in (value if isinstance(value, list) else [value])
+            ]
+            for tool, value in replies.items()
+        }
+        self.calls: list[str] = []
+        self.prompts: list[str] = []
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        tool = forced_tool(request)
+        self.calls.append(tool)
+        self.prompts.append(json.loads(request.content)["messages"][1]["content"])
+        queue = self._replies[tool]
+        arguments = queue.pop(0) if len(queue) > 1 else queue[0]
+        return tool_call(arguments, name=tool)

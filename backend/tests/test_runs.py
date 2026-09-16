@@ -1,11 +1,13 @@
 import asyncio
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
 from app.config import Settings
 from app.graph import build_graph
 from app.llm import LLMClient, LLMError, LLMTimeoutError
+from app.repair import MAX_REVISIONS
 from app.runs import (
     NODE_STAGES,
     QueueFullError,
@@ -25,16 +27,25 @@ from app.state import (
     Requirements,
 )
 from tests.fake_llm import (
+    CODE_FAILURE_VERDICT,
+    REVISED_SOLUTION,
     VALID_CRITIC_RESULT,
     VALID_GENERATED_TESTS,
     VALID_PYTHON_CODE,
     VALID_REQUIREMENTS,
     WORKFLOW_REPLIES,
+    ScriptedReplies,
     fake_llm,
     timeout,
 )
 from tests.fake_runs import Gates, hold_forever
-from tests.fake_sandbox import PASSED, FakeDockerCli, FakeSandbox
+from tests.fake_sandbox import (
+    FAILED,
+    PASSED,
+    FakeDockerCli,
+    FakeSandbox,
+    ScriptedSandbox,
+)
 
 
 def manager(
@@ -253,7 +264,7 @@ def test_unexpected_errors_expose_no_internals() -> None:
         assert internal not in run.model_dump_json()
 
 
-def test_failing_generated_tests_still_complete_the_run() -> None:
+def test_failing_tests_are_never_reported_as_success() -> None:
     failing = ExecutionResult(
         status="failed",
         exit_code=1,
@@ -262,10 +273,13 @@ def test_failing_generated_tests_still_complete_the_run() -> None:
         error_type="test_failure",
     )
 
+    # The scripted critic says pass; reconciliation turns that into a human review.
     run = asyncio.run(single_run(fake_llm(WORKFLOW_REPLIES), FakeSandbox(failing)))
 
-    assert (run.status, run.stage, run.error) == ("completed", "completed", None)
+    assert (run.status, run.stage) == ("failed", "failed")
+    assert (run.error.code, run.error.stage) == ("needs_human_review", "reviewing")
     assert run.execution_result == failing
+    assert run.critic_result.recommended_action == "needs_human_review"
 
 
 def test_sandbox_infrastructure_failure_fails_the_run_without_details() -> None:
@@ -286,6 +300,8 @@ def test_sandbox_infrastructure_failure_fails_the_run_without_details() -> None:
         "executing",
     )
     assert run.execution_result.stderr == ""
+    # One retry was spent before giving up.
+    assert run.execution_retry_count == 1
     assert "daemon" not in run.model_dump_json()
 
 
@@ -410,3 +426,80 @@ def test_shutdown_cancels_the_active_run_and_removes_its_container(
     )
     assert len(cli.ran("create")) == 1  # The waiting run never started a container.
     assert cli._started.killed
+
+
+def repair_llm(**replies: Any) -> LLMClient:
+    return fake_llm(ScriptedReplies({**WORKFLOW_REPLIES, **replies}))
+
+
+def test_a_repair_reports_revision_and_re_execution_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stages: list[str] = []
+    update = RunManager._update
+
+    def recording(self: RunManager, run_id: str, **changes: Any) -> None:
+        if "stage" in changes:
+            stages.append(changes["stage"])
+        update(self, run_id, **changes)
+
+    monkeypatch.setattr(RunManager, "_update", recording)
+    llm = repair_llm(
+        CriticResult=[CODE_FAILURE_VERDICT, VALID_CRITIC_RESULT],
+        RevisedSolution=REVISED_SOLUTION,
+    )
+
+    run = asyncio.run(single_run(llm, ScriptedSandbox(FAILED, PASSED)))
+
+    assert stages == [
+        "analyzing",
+        "generating_tests",
+        "generating_code",
+        "executing",
+        "reviewing",
+        "revising_code",
+        "executing",
+        "reviewing",
+        "completed",
+    ]
+    assert (run.status, run.revision_count, run.execution_retry_count) == (
+        "completed",
+        1,
+        0,
+    )
+    assert run.generated_code.solution_code == REVISED_SOLUTION["solution_code"]
+    assert run.execution_result == PASSED
+
+
+def test_an_exhausted_revision_budget_fails_safely_with_the_latest_artifacts() -> None:
+    llm = repair_llm(
+        CriticResult=CODE_FAILURE_VERDICT, RevisedSolution=REVISED_SOLUTION
+    )
+
+    run = asyncio.run(single_run(llm, ScriptedSandbox(FAILED)))
+
+    assert (run.status, run.error.code, run.error.stage) == (
+        "failed",
+        "revision_budget_exhausted",
+        "reviewing",
+    )
+    assert run.revision_count == MAX_REVISIONS
+    assert run.generated_code.solution_code == REVISED_SOLUTION["solution_code"]
+    assert run.execution_result == FAILED
+    assert run.critic_result.recommended_action == "revise_code"
+
+
+def test_a_failed_revision_keeps_the_previous_artifacts() -> None:
+    llm = repair_llm(CriticResult=CODE_FAILURE_VERDICT, RevisedSolution="not json")
+
+    run = asyncio.run(single_run(llm, ScriptedSandbox(FAILED)))
+
+    assert (run.status, run.error.code, run.error.stage) == (
+        "failed",
+        "llm_failed",
+        "revising_code",
+    )
+    assert run.generated_code == GeneratedCode.model_validate(VALID_PYTHON_CODE)
+    assert run.execution_result == FAILED
+    assert run.critic_result.recommended_action == "revise_code"
+    assert run.revision_count == 0

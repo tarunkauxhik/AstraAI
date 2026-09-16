@@ -109,6 +109,7 @@ def test_completed_run_exposes_every_result(api: Api) -> None:
     assert run["generated_code"] == VALID_PYTHON_CODE
     assert run["execution_result"] == PASSED.model_dump()
     assert run["critic_result"] == VALID_CRITIC_RESULT
+    assert (run["revision_count"], run["execution_retry_count"]) == (0, 0)
 
 
 def test_failed_run_keeps_earlier_results_and_a_safe_error(api: Api) -> None:

@@ -137,3 +137,33 @@ class FakeDockerCli:
             return []
         with tarfile.open(fileobj=io.BytesIO(self.sent_archive)) as archive:
             return sorted(archive.getnames())
+
+
+FAILED = ExecutionResult(
+    status="failed",
+    exit_code=1,
+    stdout="FAIL basic_word: expected cba, got abc\n",
+    tests_failed=1,
+    error_type="test_failure",
+)
+INFRASTRUCTURE_ERROR = ExecutionResult(
+    status="infrastructure_error",
+    exit_code=1,
+    stderr="Error response from daemon: unavailable",
+    error_type="container_create_failed",
+)
+
+
+class ScriptedSandbox(FakeSandbox):
+    """Executor stub replaying results in order and repeating the last one.
+
+    `calls` records exactly which code was executed each time.
+    """
+
+    def __init__(self, *results: ExecutionResult) -> None:
+        super().__init__(results[-1])
+        self._results = list(results)
+
+    async def execute(self, generated_code: GeneratedCode) -> ExecutionResult:
+        self.calls.append(generated_code)
+        return self._results.pop(0) if len(self._results) > 1 else self._results[0]

@@ -38,15 +38,40 @@ def test_graph_topology() -> None:
         "generate_code",
         "execute_sandbox",
         "critic",
+        "revise_code",
+        "revise_tests",
+        "retry_execution",
         "__end__",
     }
-    assert {(edge.source, edge.target) for edge in graph.edges} == {
-        ("__start__", "analyze_task"),
-        ("analyze_task", "generate_tests"),
-        ("generate_tests", "generate_code"),
-        ("generate_code", "execute_sandbox"),
-        ("execute_sandbox", "critic"),
-        ("critic", "__end__"),
+    assert {(edge.source, edge.target, edge.conditional) for edge in graph.edges} == {
+        ("__start__", "analyze_task", False),
+        ("analyze_task", "generate_tests", False),
+        ("generate_tests", "generate_code", False),
+        ("generate_code", "execute_sandbox", False),
+        ("execute_sandbox", "critic", False),
+        ("critic", "__end__", True),
+        ("critic", "revise_code", True),
+        ("critic", "revise_tests", True),
+        ("critic", "retry_execution", True),
+        ("revise_code", "execute_sandbox", False),
+        ("revise_tests", "execute_sandbox", False),
+        ("retry_execution", "execute_sandbox", False),
+    }
+
+
+def test_every_way_back_into_execution_passes_a_budget_counter() -> None:
+    graph = build_graph().get_graph()
+
+    into_execution = {
+        edge.source for edge in graph.edges if edge.target == "execute_sandbox"
+    }
+
+    # generate_code runs once; the others each spend a bounded budget.
+    assert into_execution == {
+        "generate_code",
+        "revise_code",
+        "revise_tests",
+        "retry_execution",
     }
 
 
