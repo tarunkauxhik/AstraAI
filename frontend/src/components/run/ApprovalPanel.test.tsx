@@ -26,7 +26,7 @@ describe("approval panel", () => {
     expect(screen.getByText(run.approval_request!.problem_summary)).toBeTruthy()
     expect(screen.getByText(/2 passed · 0 failed/)).toBeTruthy()
     expect(screen.getByText(run.approval_request!.critic_reason)).toBeTruthy()
-    expect(screen.getByText("0/2 revisions · 0/1 retries")).toBeTruthy()
+    expect(screen.getByText("0 revisions · 0 retries")).toBeTruthy()
     expect(screen.getAllByRole("timer", { name: "Time left to decide" })[0].textContent).toMatch(/^\d:\d\d$/)
     expect((button("Approve this solution") as HTMLButtonElement).disabled).toBe(false)
   })

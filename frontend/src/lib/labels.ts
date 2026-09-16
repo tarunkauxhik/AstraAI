@@ -9,7 +9,7 @@ import type {
   RunStage,
   RunStatus,
 } from "@/api/types"
-import { KNOWN_ERROR_CODES, MAX_REVISIONS } from "@/api/types"
+import { KNOWN_ERROR_CODES } from "@/api/types"
 
 /** Visual intent. Components map tones to colors and always pair them with text/icons. */
 export type Tone = "neutral" | "info" | "success" | "warning" | "danger"
@@ -60,7 +60,7 @@ export const STAGE_ACTIVITY: Record<RunStage, string> = {
 
 /** One factual sentence about each working stage. No progress or timing is implied. */
 export const STAGE_DESCRIPTION: Partial<Record<RunStage, string>> = {
-  queued: "Waiting for a free worker. Runs execute one at a time.",
+  queued: "Waiting for a free worker.",
   analyzing: "Reading the task and extracting requirements, edge cases and constraints.",
   generating_tests: "Designing a test plan from the requirements.",
   generating_code: "Writing the solution and an executable test program.",
@@ -166,7 +166,7 @@ export const ERROR_PRESENTATION: Record<KnownErrorCode, ErrorPresentation> = {
   },
   revision_budget_exhausted: {
     title: "Revision budget used",
-    description: `AstraAi used all ${MAX_REVISIONS} repair attempts without reaching a verified solution.`,
+    description: "AstraAi used its full revision budget without reaching a verified solution.",
     tone: "warning",
     category: "review",
   },

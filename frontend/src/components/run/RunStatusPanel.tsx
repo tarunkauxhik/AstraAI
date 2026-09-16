@@ -1,7 +1,6 @@
 import { Clock } from "lucide-react"
 
 import type { Run } from "@/api/types"
-import { MAX_EXECUTION_RETRIES, MAX_REVISIONS } from "@/api/types"
 import { ActivityDot } from "@/components/run/ActivityDot"
 import { ApprovalPanel } from "@/components/run/ApprovalPanel"
 import { OutcomePanel } from "@/components/run/OutcomePanel"
@@ -52,15 +51,11 @@ export function RunStatusPanel({ run }: { run: Run }) {
           </div>
           <div className="flex gap-1.5">
             <dt className="text-muted-foreground">Revisions</dt>
-            <dd className="font-mono">
-              {run.revision_count}/{MAX_REVISIONS}
-            </dd>
+            <dd className="font-mono">{run.revision_count}</dd>
           </div>
           <div className="flex gap-1.5">
             <dt className="text-muted-foreground">Retries</dt>
-            <dd className="font-mono">
-              {run.execution_retry_count}/{MAX_EXECUTION_RETRIES}
-            </dd>
+            <dd className="font-mono">{run.execution_retry_count}</dd>
           </div>
         </dl>
       )}

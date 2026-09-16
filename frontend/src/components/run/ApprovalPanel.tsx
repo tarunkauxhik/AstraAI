@@ -3,7 +3,6 @@ import { useQueryClient } from "@tanstack/react-query"
 import { Check, Loader2, ShieldCheck, X } from "lucide-react"
 
 import type { ApprovalDecision, Run } from "@/api/types"
-import { MAX_EXECUTION_RETRIES, MAX_REVISIONS } from "@/api/types"
 import { ApprovalCountdown } from "@/components/run/ApprovalCountdown"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
@@ -19,7 +18,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { useApproval } from "@/hooks/useApproval"
 import { boostRunPolling, runQueryKey } from "@/hooks/useRun"
-import { formatDateTime, formatTestCounts } from "@/lib/format"
+import { formatCount, formatDateTime, formatTestCounts } from "@/lib/format"
 import { EXECUTION_STATUS, LANGUAGE_LABELS } from "@/lib/labels"
 import { describeApprovalError } from "@/lib/run-view"
 
@@ -133,8 +132,8 @@ export function ApprovalPanel({ run }: { run: Run }) {
           )}
           <dt className="text-muted-foreground">Repairs</dt>
           <dd>
-            {run.revision_count}/{MAX_REVISIONS} revisions · {run.execution_retry_count}/
-            {MAX_EXECUTION_RETRIES} retries
+            {formatCount(run.revision_count, "revision")} ·{" "}
+            {formatCount(run.execution_retry_count, "retry", "retries")}
           </dd>
           {expiresAt && (
             <>

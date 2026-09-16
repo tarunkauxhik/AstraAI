@@ -40,6 +40,11 @@ export function formatTestCounts(
   return null
 }
 
+/** "1 revision", "0 retries". Counts only: the frontend never claims a server-side limit. */
+export function formatCount(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`
+}
+
 export function shortId(runId: string): string {
   return runId.slice(0, 8)
 }

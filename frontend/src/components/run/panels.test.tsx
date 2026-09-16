@@ -8,12 +8,14 @@ import { ArtifactPanel } from "@/components/run/ArtifactPanel"
 import { CriticPanel } from "@/components/run/CriticPanel"
 import { ExecutionPanel } from "@/components/run/ExecutionPanel"
 import { OutcomePanel } from "@/components/run/OutcomePanel"
+import { RunStatusPanel } from "@/components/run/RunStatusPanel"
 import {
   approvedThenFailedRun,
   completedRun,
   expiredRun,
   FAILED,
   needsReviewRun,
+  queuedRun,
   reExecutingAfterRevisionRun,
   rejectedRun,
   reviewingRun,
@@ -159,5 +161,44 @@ describe("artifacts", () => {
     expect(screen.getByText("Constraints")).toBeTruthy()
     expect(screen.getByText("None stated.")).toBeTruthy()
     expect(screen.getByText("Python requirements")).toBeTruthy()
+  })
+})
+
+describe("server counters without invented limits", () => {
+  it("shows revision and retry counts as plain counts while working", () => {
+    render(<RunStatusPanel run={reExecutingAfterRevisionRun} />)
+
+    const counters = screen.getByText("Revisions").closest("dl")!
+    expect(within(counters).getByText("Revisions").nextElementSibling?.textContent).toBe("1")
+    expect(within(counters).getByText("Retries").nextElementSibling?.textContent).toBe("0")
+    expect(counters.textContent).not.toContain("/")
+  })
+
+  it("shows revision and retry counts as plain counts in an outcome", () => {
+    const run: Run = { ...timedOutDuringReExecutionRun, execution_retry_count: 1 }
+    render(<OutcomePanel run={run} />)
+
+    expect(screen.getByText(/1 revision · 1 retry/)).toBeTruthy()
+    expect(document.body.textContent).not.toMatch(/\d\/\d/)
+  })
+
+  it("describes an exhausted revision budget without claiming its size", () => {
+    render(
+      <OutcomePanel
+        run={{
+          ...needsReviewRun,
+          error: { code: "revision_budget_exhausted", message: "", stage: "reviewing" },
+        }}
+      />,
+    )
+    expect(screen.getByText(/used its full revision budget/)).toBeTruthy()
+    expect(document.body.textContent).not.toMatch(/all \d|\d\/\d/)
+  })
+
+  it("does not claim runs execute one at a time while queued", () => {
+    render(<RunStatusPanel run={queuedRun} />)
+
+    expect(screen.getByText("Waiting for a free worker.")).toBeTruthy()
+    expect(document.body.textContent).not.toMatch(/one at a time/i)
   })
 })

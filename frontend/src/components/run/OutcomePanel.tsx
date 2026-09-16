@@ -2,9 +2,8 @@ import type { ReactNode } from "react"
 import { CheckCircle2 } from "lucide-react"
 
 import type { Run } from "@/api/types"
-import { MAX_EXECUTION_RETRIES, MAX_REVISIONS } from "@/api/types"
 import { TONE_ACCENT, TONE_ICON, TONE_TEXT } from "@/components/run/tone"
-import { formatDateTime, formatTestCounts } from "@/lib/format"
+import { formatCount, formatDateTime, formatTestCounts } from "@/lib/format"
 import { describeError, STAGE_LABELS, type Tone } from "@/lib/labels"
 import { executionAttempt } from "@/lib/run-view"
 import { cn } from "@/lib/utils"
@@ -74,8 +73,8 @@ export function OutcomePanel({ run }: { run: Run }) {
           )}
           <dt className="text-muted-foreground">Attempts</dt>
           <dd>
-            {attempts} · {run.revision_count}/{MAX_REVISIONS} revisions ·{" "}
-            {run.execution_retry_count}/{MAX_EXECUTION_RETRIES} retries
+            {attempts} · {formatCount(run.revision_count, "revision")} ·{" "}
+            {formatCount(run.execution_retry_count, "retry", "retries")}
           </dd>
           <dt className="text-muted-foreground">Completed</dt>
           <dd>{formatDateTime(run.updated_at)}</dd>
@@ -108,8 +107,8 @@ export function OutcomePanel({ run }: { run: Run }) {
           <>
             <dt className="text-muted-foreground">Attempts</dt>
             <dd>
-              {attempts} · {run.revision_count}/{MAX_REVISIONS} revisions ·{" "}
-              {run.execution_retry_count}/{MAX_EXECUTION_RETRIES} retries
+              {attempts} · {formatCount(run.revision_count, "revision")} ·{" "}
+              {formatCount(run.execution_retry_count, "retry", "retries")}
             </dd>
           </>
         )}

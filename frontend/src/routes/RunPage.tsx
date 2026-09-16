@@ -4,7 +4,6 @@ import { Link, useParams } from "react-router"
 
 import type { ApiError } from "@/api/client"
 import type { Run } from "@/api/types"
-import { MAX_EXECUTION_RETRIES, MAX_REVISIONS } from "@/api/types"
 import { Brand } from "@/components/Brand"
 import { ArtifactPanel } from "@/components/run/ArtifactPanel"
 import { CriticPanel } from "@/components/run/CriticPanel"
@@ -160,15 +159,11 @@ function Workspace({ run, connectionError }: { run: Run; connectionError: ApiErr
             </div>
             <div className="flex gap-1.5">
               <dt className="text-muted-foreground">Revisions</dt>
-              <dd>
-                {run.revision_count}/{MAX_REVISIONS}
-              </dd>
+              <dd>{run.revision_count}</dd>
             </div>
             <div className="flex gap-1.5">
               <dt className="text-muted-foreground">Execution retries</dt>
-              <dd>
-                {run.execution_retry_count}/{MAX_EXECUTION_RETRIES}
-              </dd>
+              <dd>{run.execution_retry_count}</dd>
             </div>
           </dl>
         </div>

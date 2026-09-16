@@ -5,7 +5,7 @@
 import type { ApiError } from "@/api/client"
 import { NETWORK_ERROR_DETAIL } from "@/api/client"
 import type { ApprovalStatus, ErrorCode, Run, RunStage } from "@/api/types"
-import { MAX_EXECUTION_RETRIES, MAX_REVISIONS } from "@/api/types"
+import { formatCount } from "@/lib/format"
 import { APPROVAL_STATUS_LABELS, describeError, type Tone } from "@/lib/labels"
 
 // ---------------------------------------------------------------------------------------
@@ -184,20 +184,20 @@ export function verifyActivity(run: Run): string | null {
     case "reviewing":
       return `Reviewing attempt ${attempt}`
     case "revising_code":
-      return `Repairing solution · revision ${run.revision_count + 1}/${MAX_REVISIONS}`
+      return `Repairing solution · revision ${run.revision_count + 1}`
     case "revising_tests":
-      return `Repairing tests · revision ${run.revision_count + 1}/${MAX_REVISIONS}`
+      return `Repairing tests · revision ${run.revision_count + 1}`
     default:
       return null
   }
 }
 
-/** Server counters in compact form, e.g. "Attempt 2 · Revision 1/2". */
+/** Server counters in compact form, e.g. "Attempt 2 · 1 revision". */
 export function verifyCounters(run: Run): string {
   const parts = [`Attempt ${executionAttempt(run)}`]
-  if (run.revision_count > 0) parts.push(`Revision ${run.revision_count}/${MAX_REVISIONS}`)
+  if (run.revision_count > 0) parts.push(formatCount(run.revision_count, "revision"))
   if (run.execution_retry_count > 0) {
-    parts.push(`Retry ${run.execution_retry_count}/${MAX_EXECUTION_RETRIES}`)
+    parts.push(formatCount(run.execution_retry_count, "retry", "retries"))
   }
   return parts.join(" · ")
 }

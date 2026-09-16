@@ -49,8 +49,9 @@ export function NewRunPage() {
   const hintId = useId()
   const errorId = useId()
 
-  // Validation mirrors the backend (strip, then 1–20,000 characters); the server rechecks.
-  const length = task.trim().length
+  // Mirrors the backend: strip, then count code points (Python len()), not UTF-16 units.
+  // The server rechecks.
+  const length = [...task.trim()].length
   const localError =
     length === 0
       ? "Describe the coding task."

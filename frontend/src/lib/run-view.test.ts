@@ -124,7 +124,7 @@ describe("execution attempts", () => {
   it("describes the current verify activity", () => {
     expect(verifyActivity(executingRun)).toBe("Running attempt 1")
     expect(verifyActivity(reviewingRun)).toBe("Reviewing attempt 1")
-    expect(verifyActivity(revisingRun)).toBe("Repairing solution · revision 1/2")
+    expect(verifyActivity(revisingRun)).toBe("Repairing solution · revision 1")
     expect(verifyActivity(reExecutingAfterRevisionRun)).toBe("Running attempt 2")
     expect(verifyActivity(retryingExecutionRun)).toBe("Retrying attempt 2 after a sandbox error")
   })
@@ -282,8 +282,11 @@ describe("evidence attempts", () => {
 
   it("summarizes server counters", () => {
     expect(verifyCounters(executingRun)).toBe("Attempt 1")
-    expect(verifyCounters(reExecutingAfterRevisionRun)).toBe("Attempt 2 · Revision 1/2")
-    expect(verifyCounters(retryingExecutionRun)).toBe("Attempt 2 · Retry 1/1")
+    expect(verifyCounters(reExecutingAfterRevisionRun)).toBe("Attempt 2 · 1 revision")
+    expect(verifyCounters(retryingExecutionRun)).toBe("Attempt 2 · 1 retry")
+    expect(verifyCounters({ ...completedRun, revision_count: 2, execution_retry_count: 1 })).toBe(
+      "Attempt 4 · 2 revisions · 1 retry",
+    )
   })
 })
 

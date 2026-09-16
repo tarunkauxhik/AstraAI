@@ -210,7 +210,9 @@ export interface HealthResponse {
   service: string
 }
 
-/** Limits enforced by the backend (RunRequest, repair.py). Mirrored for presentation. */
+/**
+ * RunRequest.task limit (backend/app/main.py), part of the public contract and mirrored for
+ * immediate feedback; the server still validates. Counted in code points, like Python len().
+ * Revision and retry budgets are deliberately not mirrored: the API doesn't expose them.
+ */
 export const TASK_MAX_LENGTH = 20_000
-export const MAX_REVISIONS = 2
-export const MAX_EXECUTION_RETRIES = 1
