@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 PASSED_TESTS = re.compile(r"^PASSED (\d+) tests", re.MULTILINE)
 FAILED_CASE = re.compile(r"^FAIL ", re.MULTILINE)
+INSPECT_FORMAT = (
+    "{{.State.ExitCode}} {{.State.OOMKilled}} {{.State.Running}} {{.State.StartedAt}}"
+)
+# Docker's zero time: the container's process was never started.
+NEVER_STARTED = "0001-01-01T00:00:00Z"
 
 
 @dataclass(frozen=True)
@@ -28,6 +33,16 @@ class Completed:
     code: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class ContainerState:
+    """What docker inspect reports about a container after the attached run ends."""
+
+    exit_code: int
+    out_of_memory: bool
+    running: bool
+    started: bool
 
 
 @dataclass(frozen=True)
@@ -52,6 +67,24 @@ async def read_capped(stream: asyncio.StreamReader, limit: int) -> tuple[str, bo
             chunks.append(chunk[: limit - size])
         size += len(chunk)
     return b"".join(chunks).decode("utf-8", errors="replace"), size > limit
+
+
+def parse_state(inspected: str) -> ContainerState | None:
+    """Parse INSPECT_FORMAT output; None if it is not what Docker should print."""
+    parts = inspected.split()
+    if len(parts) != 4:
+        return None
+    exit_text, oom_text, running_text, started_at = parts
+    try:
+        exit_code = int(exit_text)
+    except ValueError:
+        return None
+    return ContainerState(
+        exit_code=exit_code,
+        out_of_memory=oom_text == "true",
+        running=running_text == "true",
+        started=started_at != NEVER_STARTED,
+    )
 
 
 def build_archive(spec: LanguageSpec, generated_code: GeneratedCode) -> bytes:
@@ -148,8 +181,21 @@ class DockerSandbox:
             if created.code != 0:
                 return self._infrastructure("container_create_failed", created, started)
             run = await self._start(name, archive)
-            exit_code, out_of_memory = await self._inspect(name)
-            return self._result(run, exit_code, out_of_memory, started)
+            inspected = await self._docker("inspect", "--format", INSPECT_FORMAT, name)
+            state = parse_state(inspected.stdout) if inspected.code == 0 else None
+            if state is None:
+                # Without the container's state there is no trustworthy outcome.
+                return self._infrastructure(
+                    "container_inspect_failed", inspected, started
+                )
+            # In both cases below the attached stderr is the Docker CLI's, not the program's.
+            if not state.started:
+                failure = Completed(state.exit_code, "", run.stderr)
+                return self._infrastructure("container_start_failed", failure, started)
+            if state.running and not run.timed_out:
+                failure = Completed(state.exit_code, "", run.stderr)
+                return self._infrastructure("container_attach_failed", failure, started)
+            return self._result(run, state.exit_code, state.out_of_memory, started)
         finally:
             # Shielded: a second cancellation must not abort removing the container.
             await asyncio.shield(self._cleanup(name))
@@ -221,19 +267,6 @@ class DockerSandbox:
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
-    async def _inspect(self, name: str) -> tuple[int | None, bool]:
-        inspected = await self._docker(
-            "inspect", "--format", "{{.State.ExitCode}} {{.State.OOMKilled}}", name
-        )
-        if inspected.code != 0:
-            return None, False
-        exit_text, _, oom_text = inspected.stdout.strip().partition(" ")
-        out_of_memory = oom_text.strip() == "true"
-        try:
-            return int(exit_text), out_of_memory
-        except ValueError:
-            return None, out_of_memory
-
     async def _cleanup(self, name: str) -> None:
         """Remove the container. No host workspace exists: the code only ever
         lived in the tar on stdin and in the container tmpfs."""
@@ -248,17 +281,18 @@ class DockerSandbox:
     def _infrastructure(
         self, error_type: str, failure: Completed, started: float
     ) -> ExecutionResult:
+        # Docker's own diagnostics are internal: logged here, never put in the result,
+        # which the API returns and later steps may read. stdout and stderr stay empty.
         logger.warning("sandbox %s: %s", error_type, failure.stderr.strip()[:200])
         return ExecutionResult(
             status="infrastructure_error",
             exit_code=failure.code,
-            stderr=failure.stderr[: self._settings.sandbox_max_output_bytes],
             duration_ms=self._elapsed_ms(started),
             error_type=error_type,
         )
 
     def _result(
-        self, run: Run, exit_code: int | None, out_of_memory: bool, started: float
+        self, run: Run, exit_code: int, out_of_memory: bool, started: float
     ) -> ExecutionResult:
         passed = PASSED_TESTS.search(run.stdout)
         failed = len(FAILED_CASE.findall(run.stdout))

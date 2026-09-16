@@ -98,6 +98,10 @@ class FakeDockerCli:
     stderr: bytes = b""
     exit_code: int = 0
     out_of_memory: bool = False
+    # Docker could not start the process (an OCI runtime error, for example).
+    never_started: bool = False
+    # The attached client ended while the container kept running.
+    still_running: bool = False
     hang: bool = False
     failing: tuple[str, ...] = ()
     commands: list[list[str]] = field(default_factory=list)
@@ -117,7 +121,17 @@ class FakeDockerCli:
             self._started = started
             return started
         if subcommand == "inspect":
-            state = f"{self.exit_code} {'true' if self.out_of_memory else 'false'}"
+            started_at = (
+                "0001-01-01T00:00:00Z" if self.never_started else "2026-01-01T00:00:00Z"
+            )
+            state = " ".join(
+                [
+                    str(self.exit_code),
+                    "true" if self.out_of_memory else "false",
+                    "true" if self.still_running else "false",
+                    started_at,
+                ]
+            )
             return FakeProcess(0, state.encode())
         if subcommand == "kill":
             self.released.set()
@@ -149,7 +163,6 @@ FAILED = ExecutionResult(
 INFRASTRUCTURE_ERROR = ExecutionResult(
     status="infrastructure_error",
     exit_code=1,
-    stderr="Error response from daemon: unavailable",
     error_type="container_create_failed",
 )
 

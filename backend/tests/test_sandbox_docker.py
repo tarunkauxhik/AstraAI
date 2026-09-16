@@ -156,6 +156,23 @@ int main() { return add(1 2); }
 """
 
 
+def test_a_container_that_cannot_start_hides_docker_diagnostics() -> None:
+    # A user unknown to the image makes the OCI runtime refuse to start the process.
+    before = sandbox_containers()
+
+    result = run(
+        python_code("print('PASSED 1 tests')\n"), sandbox_user="astraai-no-such-user"
+    )
+
+    assert (result.status, result.error_type) == (
+        "infrastructure_error",
+        "container_start_failed",
+    )
+    assert (result.stdout, result.stderr) == ("", "")
+    assert "daemon" not in result.model_dump_json()
+    assert sandbox_containers() == before
+
+
 def test_cpp_success() -> None:
     result = run(cpp_code(CPP_TEST, CPP_SOLUTION), sandbox_timeout_seconds=120)
 

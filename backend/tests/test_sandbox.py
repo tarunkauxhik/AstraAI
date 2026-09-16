@@ -5,11 +5,18 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.sandbox.docker import DockerSandbox
+from app.sandbox.docker import DockerSandbox, parse_state
 from app.sandbox.executor import LANGUAGES
-from app.state import ExecutionResult, GeneratedCode
-from tests.fake_llm import VALID_CPP_CODE, VALID_PYTHON_CODE
+from app.state import ExecutionResult, GeneratedCode, GraphContext
+from tests.fake_llm import (
+    VALID_CPP_CODE,
+    VALID_PYTHON_CODE,
+    WORKFLOW_REPLIES,
+    ScriptedReplies,
+    fake_llm,
+)
 from tests.fake_sandbox import FakeDockerCli
+from tests.graph_runs import checkpointed_graph, start
 
 PYTHON_CODE = GeneratedCode.model_validate(VALID_PYTHON_CODE)
 CPP_CODE = GeneratedCode.model_validate(VALID_CPP_CODE)
@@ -89,15 +96,19 @@ def test_cpp_compile_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.status == "failed"
     assert result.error_type == "compile_error"
     assert result.exit_code == 90
+    # Compiler output is the program's output and stays visible.
+    assert result.stderr == "error: expected ';'\n"
 
 
 def test_timeout_kills_the_container(monkeypatch: pytest.MonkeyPatch) -> None:
-    cli = FakeDockerCli(stdout=b"working\n", hang=True)
+    cli = FakeDockerCli(stdout=b"working\n", stderr=b"still going\n", hang=True)
 
     result = execute(cli, monkeypatch, sandbox_timeout_seconds=0.05)
 
     assert result.status == "timed_out"
     assert result.error_type == "timeout"
+    # Output the program produced before the limit is still program output.
+    assert (result.stdout, result.stderr) == ("working\n", "still going\n")
     assert cli.ran("kill")
     assert cli.ran("rm")
 
@@ -112,12 +123,13 @@ def test_output_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_out_of_memory_is_a_resource_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    cli = FakeDockerCli(exit_code=137, out_of_memory=True)
+    cli = FakeDockerCli(stderr=b"allocating\n", exit_code=137, out_of_memory=True)
 
     result = execute(cli, monkeypatch)
 
     assert result.status == "resource_exceeded"
     assert result.error_type == "out_of_memory"
+    assert result.stderr == "allocating\n"
 
 
 @pytest.mark.parametrize(
@@ -127,7 +139,10 @@ def test_out_of_memory_is_a_resource_failure(monkeypatch: pytest.MonkeyPatch) ->
     ],
 )
 def test_docker_failures_are_infrastructure_errors(
-    monkeypatch: pytest.MonkeyPatch, failing: str, error_type: str
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failing: str,
+    error_type: str,
 ) -> None:
     cli = FakeDockerCli(failing=(failing,))
 
@@ -135,6 +150,10 @@ def test_docker_failures_are_infrastructure_errors(
 
     assert result.status == "infrastructure_error"
     assert result.error_type == error_type
+    # Docker's diagnostics are logged for operators but never returned as output.
+    assert (result.stdout, result.stderr) == ("", "")
+    assert "docker refused" not in result.model_dump_json()
+    assert "docker refused" in caplog.text
     assert not cli.ran("start")
     assert cli.ran("rm")
 
@@ -152,6 +171,8 @@ def test_missing_docker_cli_is_an_infrastructure_error(
 
     assert result.status == "infrastructure_error"
     assert result.exit_code == 127
+    assert (result.stdout, result.stderr) == ("", "")
+    assert "docker CLI unavailable" not in result.model_dump_json()
 
 
 @pytest.mark.parametrize(
@@ -305,3 +326,120 @@ def test_cancellation_mid_execution_removes_the_container(
     assert cli.commands[-1] == ["docker", "rm", "--force", "--volumes", name]
     assert cli._started.killed
     assert not cli.ran("inspect")  # No result is built for a cancelled execution.
+
+
+@pytest.mark.parametrize(
+    "cli",
+    [
+        pytest.param(FakeDockerCli(failing=("create",)), id="create-fails"),
+        pytest.param(
+            FakeDockerCli(stderr=b"docker refused", exit_code=127, never_started=True),
+            id="start-fails",
+        ),
+    ],
+)
+def test_infrastructure_diagnostics_never_reach_the_model_or_state_across_a_retry(
+    monkeypatch: pytest.MonkeyPatch, cli: FakeDockerCli
+) -> None:
+    monkeypatch.setattr("app.sandbox.docker.asyncio.create_subprocess_exec", cli)
+    llm = ScriptedReplies(WORKFLOW_REPLIES)
+    context = GraphContext(llm=fake_llm(llm), sandbox=DockerSandbox(Settings()))
+    initial = {"run_id": "run-1", "task": "Reverse a string.", "language": "python"}
+
+    state = asyncio.run(start(checkpointed_graph(), initial, context))
+
+    # Both attempts hit the infrastructure failure: first execution plus one retry.
+    assert len(cli.ran("create")) == 2
+    assert state["execution_retry_count"] == 1
+    assert state["execution_result"].status == "infrastructure_error"
+    assert (state["execution_result"].stdout, state["execution_result"].stderr) == (
+        "",
+        "",
+    )
+    # The critic judged it deterministically; no prompt ever carried Docker output.
+    assert "CriticResult" not in llm.calls
+    assert not any("docker refused" in prompt for prompt in llm.prompts)
+
+
+DAEMON_ERROR = (
+    b"Error response from daemon: failed to create task for container: OCI runtime "
+    b"create failed: unable to find user nobody-here: no matching entries in passwd file"
+)
+
+
+@pytest.mark.parametrize(
+    ("cli", "error_type"),
+    [
+        pytest.param(
+            FakeDockerCli(stderr=DAEMON_ERROR, exit_code=127, never_started=True),
+            "container_start_failed",
+            id="start-fails",
+        ),
+        pytest.param(
+            FakeDockerCli(
+                stdout=b"PASSED 3 tests\n",
+                stderr=DAEMON_ERROR,
+                failing=("inspect",),
+            ),
+            "container_inspect_failed",
+            id="inspect-fails",
+        ),
+        pytest.param(
+            FakeDockerCli(
+                stdout=b"partial\n",
+                stderr=b"error waiting for container: unexpected EOF",
+                exit_code=0,
+                still_running=True,
+            ),
+            "container_attach_failed",
+            id="attach-ends-while-running",
+        ),
+    ],
+)
+def test_docker_start_inspect_and_attach_failures_are_infrastructure_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    cli: FakeDockerCli,
+    error_type: str,
+) -> None:
+    result = execute(cli, monkeypatch)
+
+    assert (result.status, result.error_type) == ("infrastructure_error", error_type)
+    assert (result.stdout, result.stderr) == ("", "")
+    assert result.tests_passed is None
+    for docker_text in ("daemon", "OCI", "error waiting", "docker refused"):
+        assert docker_text not in result.model_dump_json()
+    assert error_type in caplog.text
+    assert cli.ran("rm")
+
+
+def test_a_program_exiting_127_is_still_a_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same exit code Docker reports for a failed start, but the process did run.
+    cli = FakeDockerCli(stderr=b"sh: 1: nonexistent_cmd: not found\n", exit_code=127)
+
+    result = execute(cli, monkeypatch)
+
+    assert (result.status, result.error_type) == ("failed", "runtime_error")
+    assert result.stderr == "sh: 1: nonexistent_cmd: not found\n"
+
+
+@pytest.mark.parametrize(
+    "inspected",
+    ["", "0 false", "x false false 2026-01-01T00:00:00Z", "0 false false a b"],
+)
+def test_unexpected_inspect_output_is_rejected(inspected: str) -> None:
+    assert parse_state(inspected) is None
+
+
+def test_inspect_output_is_parsed() -> None:
+    state = parse_state("137 true false 0001-01-01T00:00:00Z\n")
+
+    assert state is not None
+    assert (state.exit_code, state.out_of_memory, state.running, state.started) == (
+        137,
+        True,
+        False,
+        False,
+    )
