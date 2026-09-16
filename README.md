@@ -61,6 +61,9 @@ Fill in `backend/.env`:
 | `LLM_MAX_ATTEMPTS`    | Optional. Total attempts per LLM call, 1-5 (2)           |
 | `LLM_RETRY_BACKOFF_SECONDS` | Optional. Backoff × attempt number between tries; a 429's Retry-After up to 30s wins (1) |
 | `LLM_MAX_CONCURRENCY` | Optional. LLM requests in flight at once per process, 1-8 (2) |
+| `APPROVAL_TIMEOUT_SECONDS` | Optional. Seconds a verified solution waits for a human decision before the run expires, 5-86400 (600) |
+
+Run lifecycle and sandbox limits are listed, with defaults, in `backend/.env.example`.
 
 The app refuses to start if any required value is missing or invalid. Real environment variables override `.env`.
 
@@ -104,15 +107,31 @@ Supported languages: `python`, `cpp`.
 | `POST /runs` | 429 | Queue full (`Retry-After: 30`) |
 | `GET /runs/{run_id}` | 200 | The run, with whatever results exist so far |
 | `GET /runs/{run_id}` | 404 | Unknown run |
+| `POST /runs/{run_id}/approval` | 202 | `{"decision": "approve"}` resumes the run (`status: running`); `"reject"` ends it (`status: failed`) |
+| `POST /runs/{run_id}/approval` | 404 | Unknown run |
+| `POST /runs/{run_id}/approval` | 409 | Not waiting for approval: already decided, finished, or expired |
+| `POST /runs/{run_id}/approval` | 422 | Anything other than exactly `approve` or `reject` |
+| `POST /runs/{run_id}/approval` | 429 / 503 | Queue full / shutting down |
 
-A run has `status` (`queued`, `running`, `completed`, `failed`) and a `stage` that moves in
+A run has `status` (`queued`, `running`, `waiting_for_approval`, `completed`, `failed`) and a `stage` that moves in
 this order: `queued` → `analyzing` → `generating_tests` → `generating_code` → `executing` →
-`reviewing` → `completed`, or `failed` from any step. A repair adds `revising_code` or
+`reviewing` → `waiting_for_approval` → `resuming` → `completed`, or `failed` from any step. A repair adds `revising_code` or
 `revising_tests` followed by `executing` and `reviewing` again. `requirements`, `generated_tests`, `generated_code`
 `execution_result` and `critic_result` fill in as each step finishes and are kept if a later step fails.
 A failed run carries a safe `error` of `{code, message, stage}`, never internal details.
 
-A run is `completed` only when the critic accepts the final code. Otherwise it is `failed`
+A run is `completed` only when the critic accepts the final code **and a human approves it**.
+When the critic accepts, the run pauses at `waiting_for_approval` (`approval_status: pending`,
+`approval_required: true`) with a compact `approval_request` and `approval_expires_at`. The
+paused graph is checkpointed in memory under the run id and frees the worker for other runs.
+Approving sets `approval_status: approved` and stage `resuming`, then continues the same
+LangGraph thread without repeating any LLM call or execution. Rejecting fails the run at once
+with `approval_rejected`. With no decision within `APPROVAL_TIMEOUT_SECONDS`, counted from
+when approval was requested, the run fails with `approval_expired` (`approval_status:
+expired`); a background sweep checks once a minute, and a late decision gets 409 either way.
+Checkpoints are deleted as soon as a run ends.
+
+Otherwise it is `failed`
 with `error.code` `needs_human_review`, `revision_budget_exhausted` or `sandbox_unavailable`,
 keeping the latest code, execution result and critic result. `revision_count` and
 `execution_retry_count` show how much of each budget a run used.
@@ -120,10 +139,10 @@ keeping the latest code, execution result and critic result. `revision_count` an
 One full run executes at a time (`RUN_MAX_ACTIVE_RUNS`), up to `RUN_MAX_QUEUED_RUNS` wait,
 and the newest `RUN_MAX_RETAINED_RUNS` finished runs are kept in memory.
 
-A whole run is stopped after `RUN_TIMEOUT_SECONDS` (300; per-LLM-call and sandbox timeouts
-still apply inside it) and fails with `run_timeout`; its sandbox container is removed and the
+A whole run is stopped after `RUN_TIMEOUT_SECONDS` (300) of active work (per-LLM-call and
+sandbox timeouts still apply inside it; time waiting for approval never counts) and fails with `run_timeout`; its sandbox container is removed and the
 next queued run starts. On shutdown the service stops accepting runs (`POST` returns 503),
-waiting runs fail with `shutdown`, and the active run is cancelled and its container removed
+queued and approval-waiting runs fail with `shutdown`, and the active run is cancelled and its container removed
 before the process exits. Runs are held in memory, so a restart forgets them.
 
 ## Generated code contract
@@ -168,7 +187,7 @@ After each execution the critic's reconciled `recommended_action` decides what h
 
 | Action | Next step | Budget |
 | ------ | --------- | ------ |
-| `accept` | end, completed | - |
+| `accept` | `human_approval`, then completed or failed | approval timeout |
 | `needs_human_review` | end, needs review | - |
 | `revise_code` | `revise_code` rewrites **only** the solution, then re-executes | 2 revisions per run, shared with tests |
 | `revise_tests` | `revise_tests` rewrites **only** the test code, then re-executes | same budget |

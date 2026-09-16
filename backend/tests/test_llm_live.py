@@ -11,7 +11,6 @@ import pytest
 from langgraph.runtime import Runtime
 
 from app.config import Settings
-from app.graph import build_graph
 from app.llm import LLMClient
 from app.nodes.critic import critic
 from app.sandbox.docker import DockerSandbox
@@ -23,6 +22,7 @@ from app.state import (
     Requirements,
 )
 from tests.fake_sandbox import FakeSandbox
+from tests.graph_runs import checkpointed_graph, start
 
 pytestmark = [
     pytest.mark.live,
@@ -52,8 +52,10 @@ def real_context(sandbox: object | None = None) -> GraphContext:
 
 def run_pipeline(task: str, language: str, context: GraphContext) -> dict:
     return asyncio.run(
-        build_graph().ainvoke(
-            {"run_id": "live", "task": task, "language": language}, context=context
+        start(
+            checkpointed_graph(),
+            {"run_id": "live", "task": task, "language": language},
+            context,
         )
     )
 

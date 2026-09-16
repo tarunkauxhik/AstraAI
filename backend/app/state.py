@@ -209,6 +209,38 @@ class RevisedTests(BaseModel):
     )
 
 
+ApprovalStatus = Literal["pending", "approved", "rejected", "expired"]
+
+
+class ApprovalDecision(BaseModel):
+    """A human's answer to an approval request. Nothing else is accepted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+
+
+class ApprovalRequest(BaseModel):
+    """What a human sees when asked to approve a verified solution.
+
+    Kept small and JSON-only; the code itself stays in the run's generated_code.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    task: str
+    language: Language
+    problem_summary: str
+    execution_status: ExecutionStatus
+    tests_passed: int | None
+    tests_failed: int | None
+    critic_reason: str
+    revision_count: int
+    execution_retry_count: int
+    approval_means: str
+
+
 class AgentState(TypedDict):
     """State shared by every node of an AstraAi run."""
 
@@ -223,6 +255,7 @@ class AgentState(TypedDict):
     # Bounded repair-loop counters; absent means 0.
     revision_count: NotRequired[int]
     execution_retry_count: NotRequired[int]
+    approval_status: NotRequired[ApprovalStatus]
     status: NotRequired[Literal["pending", "running", "succeeded", "failed"]]
     errors: NotRequired[list[str]]
 

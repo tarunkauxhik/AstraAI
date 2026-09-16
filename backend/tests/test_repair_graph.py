@@ -3,7 +3,6 @@
 import asyncio
 from typing import Any
 
-from app.graph import build_graph
 from app.repair import MAX_EXECUTION_RETRIES, MAX_REVISIONS, repair_router
 from app.state import CriticResult, GeneratedCode, GraphContext
 from tests.fake_llm import (
@@ -18,6 +17,7 @@ from tests.fake_llm import (
     fake_llm,
 )
 from tests.fake_sandbox import FAILED, INFRASTRUCTURE_ERROR, PASSED, ScriptedSandbox
+from tests.graph_runs import checkpointed_graph, start
 
 INITIAL = {"run_id": "run-1", "task": "Reverse a string.", "language": "python"}
 ORIGINAL = GeneratedCode.model_validate(VALID_PYTHON_CODE)
@@ -29,10 +29,14 @@ def run_graph(
 ) -> tuple[dict[str, Any], ScriptedReplies]:
     scripted = ScriptedReplies({**WORKFLOW_REPLIES, **replies})
     state = asyncio.run(
-        build_graph().ainvoke(
-            INITIAL, context=GraphContext(llm=fake_llm(scripted), sandbox=sandbox)
+        start(
+            checkpointed_graph(),
+            INITIAL,
+            GraphContext(llm=fake_llm(scripted), sandbox=sandbox),
         )
     )
+    # Only an accepted solution reaches human approval; every other ending is final.
+    assert ("__interrupt__" in state) == (repair_router(state) == "accept")
     return state, scripted
 
 

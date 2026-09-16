@@ -45,6 +45,7 @@ def test_run_lifecycle_over_http(monkeypatch: pytest.MonkeyPatch) -> None:
         "app.main.build_run_manager", manager_factory(slow_llm, SlowSandbox)
     )
     stages: list[str] = []
+    approved = False
 
     with TestClient(app) as client:
         accepted = client.post(
@@ -58,19 +59,27 @@ def test_run_lifecycle_over_http(monkeypatch: pytest.MonkeyPatch) -> None:
             run = client.get(f"/runs/{run_id}").json()
             if not stages or stages[-1] != run["stage"]:
                 stages.append(run["stage"])
+            if run["status"] == "waiting_for_approval" and not approved:
+                decision = {"decision": "approve"}
+                response = client.post(f"/runs/{run_id}/approval", json=decision)
+                assert response.status_code == 202
+                approved = True
             if run["status"] in ("completed", "failed"):
                 break
             assert time.monotonic() < deadline, f"stuck at {run['stage']}"
             time.sleep(0.02)
 
     assert run["status"] == "completed"
-    assert [stage for stage in stages if stage != "queued"] == [
+    # Resuming after approval is too quick to observe reliably when polling.
+    assert [stage for stage in stages if stage not in ("queued", "resuming")] == [
         "analyzing",
         "generating_tests",
         "generating_code",
         "executing",
         "reviewing",
+        "waiting_for_approval",
         "completed",
     ]
+    assert run["approval_status"] == "approved"
     assert run["execution_result"]["status"] == "passed"
     assert run["generated_code"]["solution_code"]

@@ -3,13 +3,14 @@
 import asyncio
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx2
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.graph import build_graph
+from app.graph import build_checkpointer, build_graph
 from app.llm import LLMClient
 from app.runs import RunManager
 from app.sandbox.executor import SandboxExecutor
@@ -57,6 +58,19 @@ class Gates:
         return GatedSandbox(self.events["sandbox"], result)
 
 
+class Clock:
+    """A controllable UTC clock for RunManager, so approval timeouts need no sleeping."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
 async def hold_forever(request: httpx2.Request) -> httpx2.Response:
     """LLM handler that never answers, keeping a run busy for as long as a test needs."""
     await asyncio.Event().wait()
@@ -68,6 +82,7 @@ def manager_factory(
     sandbox: Callable[[], SandboxExecutor] = FakeSandbox,
     *,
     max_queued_runs: int = 10,
+    **options: Any,
 ) -> Callable[[Settings, GraphContext], RunManager]:
     """Stand-in for app.main.build_run_manager that wires in fakes.
 
@@ -76,12 +91,14 @@ def manager_factory(
 
     def build(settings: Settings, context: GraphContext) -> RunManager:
         return RunManager(
-            build_graph(),
+            build_graph(build_checkpointer()),
             GraphContext(llm=fake_llm(reply), sandbox=sandbox()),
             max_active_runs=1,
             max_queued_runs=max_queued_runs,
             max_retained_runs=100,
             run_timeout_seconds=300,
+            approval_timeout_seconds=600,
+            **options,
         )
 
     return build

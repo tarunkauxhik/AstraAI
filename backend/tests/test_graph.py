@@ -24,12 +24,13 @@ from tests.fake_llm import (
     tool_call,
 )
 from tests.fake_sandbox import PASSED, FakeSandbox
+from tests.graph_runs import checkpointed_graph, start
 
 INITIAL = {"run_id": "run-1", "task": "Reverse a string.", "language": "python"}
 
 
 def test_graph_topology() -> None:
-    graph = build_graph().get_graph()
+    graph = build_graph(None).get_graph()
 
     assert set(graph.nodes) == {
         "__start__",
@@ -41,6 +42,7 @@ def test_graph_topology() -> None:
         "revise_code",
         "revise_tests",
         "retry_execution",
+        "human_approval",
         "__end__",
     }
     assert {(edge.source, edge.target, edge.conditional) for edge in graph.edges} == {
@@ -49,6 +51,7 @@ def test_graph_topology() -> None:
         ("generate_tests", "generate_code", False),
         ("generate_code", "execute_sandbox", False),
         ("execute_sandbox", "critic", False),
+        ("critic", "human_approval", True),
         ("critic", "__end__", True),
         ("critic", "revise_code", True),
         ("critic", "revise_tests", True),
@@ -56,11 +59,12 @@ def test_graph_topology() -> None:
         ("revise_code", "execute_sandbox", False),
         ("revise_tests", "execute_sandbox", False),
         ("retry_execution", "execute_sandbox", False),
+        ("human_approval", "__end__", False),
     }
 
 
 def test_every_way_back_into_execution_passes_a_budget_counter() -> None:
-    graph = build_graph().get_graph()
+    graph = build_graph(None).get_graph()
 
     into_execution = {
         edge.source for edge in graph.edges if edge.target == "execute_sandbox"
@@ -85,10 +89,13 @@ def test_graph_feeds_each_node_and_stores_every_result() -> None:
         return tool_call(WORKFLOW_REPLIES[tool], name=tool)
 
     state = asyncio.run(
-        build_graph().ainvoke(
-            INITIAL, context=GraphContext(llm=fake_llm(handler), sandbox=sandbox)
+        start(
+            checkpointed_graph(),
+            INITIAL,
+            GraphContext(llm=fake_llm(handler), sandbox=sandbox),
         )
     )
+    interrupts = state.pop("__interrupt__")
 
     requirements = Requirements.model_validate(VALID_REQUIREMENTS)
     generated_tests = GeneratedTests.model_validate(VALID_GENERATED_TESTS)
@@ -101,6 +108,8 @@ def test_graph_feeds_each_node_and_stores_every_result() -> None:
         "execution_result": PASSED,
         "critic_result": CriticResult.model_validate(VALID_CRITIC_RESULT),
     }
+    # An accepted solution pauses for human approval before the run can end.
+    assert len(interrupts) == 1
     assert list(prompts) == [
         "Requirements",
         "GeneratedTests",
@@ -145,8 +154,10 @@ def test_graph_stops_at_the_failing_node(
 
     with pytest.raises(LLMError):
         asyncio.run(
-            build_graph().ainvoke(
-                INITIAL, context=GraphContext(llm=fake_llm(handler), sandbox=sandbox)
+            start(
+                checkpointed_graph(),
+                INITIAL,
+                GraphContext(llm=fake_llm(handler), sandbox=sandbox),
             )
         )
 
@@ -160,10 +171,13 @@ def test_graph_completes_with_a_human_review_when_the_critic_answer_is_invalid()
     replies = {**WORKFLOW_REPLIES, "CriticResult": "not json"}
 
     state = asyncio.run(
-        build_graph().ainvoke(
-            INITIAL, context=GraphContext(llm=fake_llm(replies), sandbox=FakeSandbox())
+        start(
+            checkpointed_graph(),
+            INITIAL,
+            GraphContext(llm=fake_llm(replies), sandbox=FakeSandbox()),
         )
     )
 
     assert state["critic_result"] == INVALID_VERDICT
     assert state["execution_result"] == PASSED
+    assert "__interrupt__" not in state

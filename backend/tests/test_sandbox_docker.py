@@ -10,7 +10,7 @@ import subprocess
 import pytest
 
 from app.config import Settings
-from app.graph import build_graph
+from app.graph import build_checkpointer, build_graph
 from app.runs import RunManager
 from app.sandbox.docker import DockerSandbox
 from app.state import ExecutionResult, GeneratedCode, GraphContext
@@ -305,7 +305,7 @@ def looping_run_manager(run_timeout_seconds: float) -> RunManager:
         "GeneratedCode": INFINITE_LOOP_CODE.model_dump_json(),
     }
     return RunManager(
-        build_graph(),
+        build_graph(build_checkpointer()),
         GraphContext(
             llm=fake_llm(replies),
             sandbox=DockerSandbox(Settings(sandbox_timeout_seconds=120)),
@@ -314,6 +314,7 @@ def looping_run_manager(run_timeout_seconds: float) -> RunManager:
         max_queued_runs=10,
         max_retained_runs=100,
         run_timeout_seconds=run_timeout_seconds,
+        approval_timeout_seconds=600,
     )
 
 

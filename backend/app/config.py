@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     run_max_retained_runs: int = Field(default=100, ge=10, le=1000)
     # Caps the whole graph run; per-LLM-call and sandbox timeouts still apply inside it.
     run_timeout_seconds: float = Field(default=300, ge=30, le=3600)
+    # How long a verified solution waits for a human decision before the run expires.
+    # Separate from run_timeout_seconds, which counts active work only.
+    approval_timeout_seconds: float = Field(default=600, ge=5, le=86_400)
 
 
 @lru_cache

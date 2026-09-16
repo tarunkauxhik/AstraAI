@@ -17,7 +17,7 @@ from tests.fake_llm import (
     WORKFLOW_REPLIES,
     Reply,
 )
-from tests.fake_runs import hold_forever, manager_factory, poll
+from tests.fake_runs import Clock, hold_forever, manager_factory, poll
 from tests.fake_sandbox import PASSED, FakeSandbox
 
 # Python: the workflow fixtures generate Python code, and the sandbox node checks the match.
@@ -33,8 +33,11 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Api:
         reply: Reply = WORKFLOW_REPLIES,
         sandbox: Callable[[], SandboxExecutor] = FakeSandbox,
         max_queued_runs: int = 10,
+        **options: Any,
     ) -> TestClient:
-        factory = manager_factory(reply, sandbox, max_queued_runs=max_queued_runs)
+        factory = manager_factory(
+            reply, sandbox, max_queued_runs=max_queued_runs, **options
+        )
         monkeypatch.setattr("app.main.build_run_manager", factory)
         return TestClient(app)
 
@@ -47,6 +50,17 @@ def running(run: dict[str, Any]) -> bool:
 
 def finished(run: dict[str, Any]) -> bool:
     return run["status"] in ("completed", "failed")
+
+
+def waiting(run: dict[str, Any]) -> bool:
+    return run["status"] == "waiting_for_approval"
+
+
+def paused_run(client: TestClient) -> str:
+    """Start a run and wait until it asks for approval."""
+    run_id = client.post("/runs", json=VALID_RUN).json()["run_id"]
+    poll(client, run_id, waiting)
+    return run_id
 
 
 def test_health_reports_running() -> None:
@@ -95,8 +109,12 @@ def test_get_queued_run_while_another_runs(api: Api) -> None:
 
 def test_completed_run_exposes_every_result(api: Api) -> None:
     with api() as client:
-        run_id = client.post("/runs", json=VALID_RUN).json()["run_id"]
+        run_id = paused_run(client)
+        approval = client.post(f"/runs/{run_id}/approval", json={"decision": "approve"})
         run = poll(client, run_id, finished)
+
+    assert approval.status_code == 202
+    assert approval.json() == {"run_id": run_id, "status": "running"}
 
     assert (run["status"], run["stage"], run["error"]) == (
         "completed",
@@ -110,6 +128,7 @@ def test_completed_run_exposes_every_result(api: Api) -> None:
     assert run["execution_result"] == PASSED.model_dump()
     assert run["critic_result"] == VALID_CRITIC_RESULT
     assert (run["revision_count"], run["execution_retry_count"]) == (0, 0)
+    assert (run["approval_status"], run["approval_required"]) == ("approved", False)
 
 
 def test_failed_run_keeps_earlier_results_and_a_safe_error(api: Api) -> None:
@@ -196,3 +215,161 @@ def test_post_during_shutdown_returns_503(api: Api) -> None:
     assert response.json() == {
         "detail": "The service is shutting down. Try again shortly."
     }
+
+
+def test_a_run_waiting_for_approval_shows_what_to_decide(api: Api) -> None:
+    with api() as client:
+        run_id = paused_run(client)
+        run = client.get(f"/runs/{run_id}").json()
+
+    assert (run["status"], run["stage"], run["error"]) == (
+        "waiting_for_approval",
+        "waiting_for_approval",
+        None,
+    )
+    assert (run["approval_status"], run["approval_required"]) == ("pending", True)
+    request = run["approval_request"]
+    assert (request["run_id"], request["execution_status"]) == (run_id, "passed")
+    assert request["approval_means"]
+    assert run["generated_code"] == VALID_PYTHON_CODE
+    # Checkpoint internals are never exposed.
+    for internal in ("thread_id", "checkpoint", "__interrupt__", "configurable"):
+        assert internal not in str(run)
+
+
+def test_rejection_over_http_fails_the_run(api: Api) -> None:
+    with api() as client:
+        run_id = paused_run(client)
+        response = client.post(f"/runs/{run_id}/approval", json={"decision": "reject"})
+        run = poll(client, run_id, finished)
+
+    assert response.status_code == 202
+    assert (run["status"], run["approval_status"]) == ("failed", "rejected")
+    assert run["error"] == {
+        "code": "approval_rejected",
+        "message": "A human rejected the verified solution.",
+        "stage": "waiting_for_approval",
+    }
+
+
+def test_duplicate_approval_is_a_conflict(api: Api) -> None:
+    with api() as client:
+        run_id = paused_run(client)
+        first = client.post(f"/runs/{run_id}/approval", json={"decision": "approve"})
+        second = client.post(f"/runs/{run_id}/approval", json={"decision": "reject"})
+        run = poll(client, run_id, finished)
+        after = client.post(f"/runs/{run_id}/approval", json={"decision": "approve"})
+
+    assert (first.status_code, second.status_code, after.status_code) == (
+        202,
+        409,
+        409,
+    )
+    assert second.json() == {"detail": "The run is not waiting for approval."}
+    assert (run["status"], run["approval_status"]) == ("completed", "approved")
+
+
+def test_approving_a_run_that_is_not_waiting_is_a_conflict(api: Api) -> None:
+    with api(hold_forever) as client:
+        run_id = client.post("/runs", json=VALID_RUN).json()["run_id"]
+        poll(client, run_id, running)
+        response = client.post(f"/runs/{run_id}/approval", json={"decision": "approve"})
+
+    assert response.status_code == 409
+
+
+def test_approving_an_unknown_run_is_404(api: Api) -> None:
+    with api() as client:
+        response = client.post(
+            "/runs/does-not-exist/approval", json={"decision": "approve"}
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Run not found."}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"decision": "yes"}, id="unknown-decision"),
+        pytest.param({"decision": "Approve"}, id="wrong-case"),
+        pytest.param({"decision": True}, id="boolean"),
+        pytest.param({}, id="missing-decision"),
+        pytest.param({"decision": "approve", "note": "lgtm"}, id="extra-field"),
+        pytest.param("approve", id="bare-string"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_malformed_approval_is_422_and_the_run_keeps_waiting(
+    api: Api, body: object
+) -> None:
+    with api() as client:
+        run_id = paused_run(client)
+        response = client.post(f"/runs/{run_id}/approval", json=body)
+        run = client.get(f"/runs/{run_id}").json()
+
+    assert response.status_code == 422
+    assert (run["status"], run["approval_status"]) == (
+        "waiting_for_approval",
+        "pending",
+    )
+
+
+def test_non_json_approval_is_422(api: Api) -> None:
+    with api() as client:
+        run_id = paused_run(client)
+        response = client.post(
+            f"/runs/{run_id}/approval",
+            content=b"approve",
+            headers={"content-type": "application/json"},
+        )
+        run = client.get(f"/runs/{run_id}").json()
+
+    assert response.status_code == 422
+    assert run["status"] == "waiting_for_approval"
+
+
+def test_approval_during_shutdown_returns_503(api: Api) -> None:
+    with api() as client:
+        run_id = paused_run(client)
+        client.portal.call(app.state.runs.stop)
+        response = client.post(f"/runs/{run_id}/approval", json={"decision": "approve"})
+
+    assert response.status_code == 503
+
+
+def test_an_expired_approval_is_409_and_shows_as_expired(api: Api) -> None:
+    clock = Clock()
+    with api(clock=clock) as client:
+        run_id = paused_run(client)
+        clock.advance(600)
+        responses = [
+            client.post(f"/runs/{run_id}/approval", json={"decision": decision})
+            for decision in ("approve", "reject")
+        ]
+        run = client.get(f"/runs/{run_id}").json()
+
+    for response in responses:
+        assert response.status_code == 409
+        assert response.json() == {"detail": "The approval request has expired."}
+    assert (run["status"], run["stage"]) == ("failed", "failed")
+    assert (run["approval_status"], run["approval_required"]) == ("expired", False)
+    assert run["error"]["code"] == "approval_expired"
+    assert run["approval_expires_at"] is not None
+
+
+def test_a_rejected_run_cannot_be_decided_again(api: Api) -> None:
+    with api() as client:
+        run_id = paused_run(client)
+        rejected = client.post(f"/runs/{run_id}/approval", json={"decision": "reject"})
+        again = [
+            client.post(f"/runs/{run_id}/approval", json={"decision": decision})
+            for decision in ("approve", "reject")
+        ]
+
+    assert (rejected.status_code, rejected.json()) == (
+        202,
+        {"run_id": run_id, "status": "failed"},
+    )
+    assert [response.status_code for response in again] == [409, 409]
+    assert again[0].json() == {"detail": "The run is not waiting for approval."}
