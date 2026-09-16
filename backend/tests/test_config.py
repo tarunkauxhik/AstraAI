@@ -43,6 +43,8 @@ def test_settings_load_from_dotenv_file(
         ("LLM_RETRY_BACKOFF_SECONDS", "-1"),
         ("LLM_MAX_CONCURRENCY", "0"),
         ("LLM_MAX_CONCURRENCY", "9"),
+        ("RUN_TIMEOUT_SECONDS", "10"),
+        ("RUN_TIMEOUT_SECONDS", "7200"),
     ],
 )
 def test_settings_reject_invalid_values(
@@ -62,6 +64,7 @@ def test_llm_reliability_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.llm_max_attempts == 2
     assert settings.llm_retry_backoff_seconds == 1.0
     assert settings.llm_max_concurrency == 2
+    assert settings.run_timeout_seconds == 300
 
 
 def test_settings_errors_do_not_echo_the_api_key(

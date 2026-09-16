@@ -78,12 +78,16 @@ class FakeProcess:
         self.stdout = FakeStream(stdout, release)
         self.stderr = FakeStream(stderr, release)
         self.stdin = FakeWriter()
+        self.killed = False
 
     async def communicate(self) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr
 
     async def wait(self) -> int:
         return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
 
 
 @dataclass

@@ -120,11 +120,22 @@ int main() {
 VALID_CPP_CODE_JSON = json.dumps(VALID_CPP_CODE)
 
 
+# A critic verdict, as stored in state and returned by the API.
+VALID_CRITIC_RESULT = {
+    "verdict": "pass",
+    "reason": "Every test passed and the implementation reverses the string as required.",
+    "code_issue": "",
+    "test_issue": "",
+    "recommended_action": "accept",
+}
+VALID_CRITIC_RESULT_JSON = json.dumps(VALID_CRITIC_RESULT)
+
 # Valid tool arguments for every node of the workflow, keyed by tool name.
 WORKFLOW_REPLIES = {
     "Requirements": VALID_REQUIREMENTS_JSON,
     "GeneratedTests": VALID_GENERATED_TESTS_JSON,
     "GeneratedCode": VALID_PYTHON_CODE_JSON,
+    "CriticResult": VALID_CRITIC_RESULT_JSON,
 }
 
 # Reasoning the live MiniMax gateway leaves in `content` next to a tool call.

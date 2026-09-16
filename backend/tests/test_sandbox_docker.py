@@ -10,8 +10,11 @@ import subprocess
 import pytest
 
 from app.config import Settings
+from app.graph import build_graph
+from app.runs import RunManager
 from app.sandbox.docker import DockerSandbox
-from app.state import ExecutionResult, GeneratedCode
+from app.state import ExecutionResult, GeneratedCode, GraphContext
+from tests.fake_llm import WORKFLOW_REPLIES, fake_llm
 
 pytestmark = [
     pytest.mark.docker,
@@ -284,4 +287,96 @@ def test_repeated_runs_leave_nothing_behind() -> None:
     run(python_code("import sys\nsys.exit(1)\n"))
     run(python_code("while True:\n    pass\n"), sandbox_timeout_seconds=2)
 
+    assert sandbox_containers() == before
+
+
+INFINITE_LOOP_CODE = GeneratedCode(
+    language="python",
+    solution_code=TRIVIAL_SOLUTION,
+    test_code="while True:\n    pass\n",
+    explanation="never finishes",
+)
+
+
+def looping_run_manager(run_timeout_seconds: float) -> RunManager:
+    """A run manager whose workflow generates code that loops forever, on real Docker."""
+    replies = {
+        **WORKFLOW_REPLIES,
+        "GeneratedCode": INFINITE_LOOP_CODE.model_dump_json(),
+    }
+    return RunManager(
+        build_graph(),
+        GraphContext(
+            llm=fake_llm(replies),
+            sandbox=DockerSandbox(Settings(sandbox_timeout_seconds=120)),
+        ),
+        max_active_runs=1,
+        max_queued_runs=10,
+        max_retained_runs=100,
+        run_timeout_seconds=run_timeout_seconds,
+    )
+
+
+async def wait_for_container(before: list[str]) -> list[str]:
+    """Wait until a new sandbox container really exists, then return the list."""
+    for _ in range(300):
+        containers = sandbox_containers()
+        if len(containers) > len(before):
+            return containers
+        await asyncio.sleep(0.05)
+    raise AssertionError("no sandbox container appeared")
+
+
+async def wait_for_stage(runs: RunManager, run_id: str, stage: str) -> None:
+    for _ in range(600):
+        if runs.get(run_id).stage == stage:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"run never reached {stage}")
+
+
+def test_run_timeout_removes_the_real_container() -> None:
+    before = sandbox_containers()
+
+    async def scenario() -> tuple[str, str, list[str]]:
+        runs = looping_run_manager(run_timeout_seconds=4)
+        await runs.start()
+        try:
+            run_id = runs.submit("loop", "python").run_id
+            await wait_for_stage(runs, run_id, "executing")
+            running_containers = await wait_for_container(before)
+            for _ in range(200):
+                if runs.get(run_id).status == "failed":
+                    break
+                await asyncio.sleep(0.05)
+            run = runs.get(run_id)
+            return run.status, run.error.code, running_containers
+        finally:
+            await runs.stop()
+
+    status, code, running_containers = asyncio.run(scenario())
+
+    assert (status, code) == ("failed", "run_timeout")
+    assert len(running_containers) == len(before) + 1  # A container really was running.
+    assert sandbox_containers() == before
+
+
+def test_shutdown_removes_the_real_container() -> None:
+    before = sandbox_containers()
+
+    async def scenario() -> tuple[str, list[str]]:
+        runs = looping_run_manager(run_timeout_seconds=300)
+        await runs.start()
+        run_id = runs.submit("loop", "python").run_id
+        await wait_for_stage(runs, run_id, "executing")
+        running_containers = await wait_for_container(before)
+
+        await runs.stop()
+
+        return runs.get(run_id).error.code, running_containers
+
+    code, running_containers = asyncio.run(scenario())
+
+    assert code == "shutdown"
+    assert len(running_containers) == len(before) + 1
     assert sandbox_containers() == before

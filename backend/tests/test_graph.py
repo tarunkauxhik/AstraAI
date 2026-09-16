@@ -5,8 +5,16 @@ import pytest
 
 from app.graph import build_graph
 from app.llm import LLMError
-from app.state import GeneratedCode, GeneratedTests, GraphContext, Requirements
+from app.nodes.critic import INVALID_VERDICT
+from app.state import (
+    CriticResult,
+    GeneratedCode,
+    GeneratedTests,
+    GraphContext,
+    Requirements,
+)
 from tests.fake_llm import (
+    VALID_CRITIC_RESULT,
     VALID_GENERATED_TESTS,
     VALID_PYTHON_CODE,
     VALID_REQUIREMENTS,
@@ -29,6 +37,7 @@ def test_graph_topology() -> None:
         "generate_tests",
         "generate_code",
         "execute_sandbox",
+        "critic",
         "__end__",
     }
     assert {(edge.source, edge.target) for edge in graph.edges} == {
@@ -36,7 +45,8 @@ def test_graph_topology() -> None:
         ("analyze_task", "generate_tests"),
         ("generate_tests", "generate_code"),
         ("generate_code", "execute_sandbox"),
-        ("execute_sandbox", "__end__"),
+        ("execute_sandbox", "critic"),
+        ("critic", "__end__"),
     }
 
 
@@ -64,31 +74,40 @@ def test_graph_feeds_each_node_and_stores_every_result() -> None:
         "generated_tests": generated_tests,
         "generated_code": generated_code,
         "execution_result": PASSED,
+        "critic_result": CriticResult.model_validate(VALID_CRITIC_RESULT),
     }
-    assert list(prompts) == ["Requirements", "GeneratedTests", "GeneratedCode"]
+    assert list(prompts) == [
+        "Requirements",
+        "GeneratedTests",
+        "GeneratedCode",
+        "CriticResult",
+    ]
     assert requirements.problem_summary in prompts["GeneratedCode"]
     assert generated_tests.cases[0].name in prompts["GeneratedCode"]
+    assert "PASSED 3 tests" in prompts["CriticResult"]
     assert sandbox.calls == [generated_code]
 
 
 @pytest.mark.parametrize(
-    ("failing_tool", "expected_tools"),
+    ("failing_tool", "expected_tools", "sandbox_calls"),
     [
-        pytest.param("Requirements", ["Requirements"] * 2, id="analysis-fails"),
+        pytest.param("Requirements", ["Requirements"] * 2, 0, id="analysis-fails"),
         pytest.param(
             "GeneratedTests",
             ["Requirements", "GeneratedTests", "GeneratedTests"],
+            0,
             id="test-plan-fails",
         ),
         pytest.param(
             "GeneratedCode",
             ["Requirements", "GeneratedTests", "GeneratedCode", "GeneratedCode"],
+            0,
             id="code-generation-fails",
         ),
     ],
 )
 def test_graph_stops_at_the_failing_node(
-    failing_tool: str, expected_tools: list[str]
+    failing_tool: str, expected_tools: list[str], sandbox_calls: int
 ) -> None:
     tools: list[str] = []
     sandbox = FakeSandbox()
@@ -107,4 +126,19 @@ def test_graph_stops_at_the_failing_node(
         )
 
     assert tools == expected_tools
-    assert sandbox.calls == []
+    assert len(sandbox.calls) == sandbox_calls
+
+
+def test_graph_completes_with_a_human_review_when_the_critic_answer_is_invalid() -> (
+    None
+):
+    replies = {**WORKFLOW_REPLIES, "CriticResult": "not json"}
+
+    state = asyncio.run(
+        build_graph().ainvoke(
+            INITIAL, context=GraphContext(llm=fake_llm(replies), sandbox=FakeSandbox())
+        )
+    )
+
+    assert state["critic_result"] == INVALID_VERDICT
+    assert state["execution_result"] == PASSED

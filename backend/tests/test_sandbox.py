@@ -281,3 +281,27 @@ def test_sandbox_defaults_are_conservative() -> None:
     assert settings.sandbox_memory_mb == 512
     assert settings.sandbox_pids_limit == 64
     assert settings.sandbox_timeout_seconds == 30
+
+
+def test_cancellation_mid_execution_removes_the_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = FakeDockerCli(hang=True)
+    monkeypatch.setattr("app.sandbox.docker.asyncio.create_subprocess_exec", cli)
+
+    async def scenario() -> None:
+        sandbox = DockerSandbox(Settings(sandbox_timeout_seconds=60))
+        execution = asyncio.create_task(sandbox.execute(PYTHON_CODE))
+        while not cli.ran("start"):
+            await asyncio.sleep(0.005)
+
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+    asyncio.run(scenario())
+
+    name = cli.ran("create")[0][cli.ran("create")[0].index("--name") + 1]
+    assert cli.commands[-1] == ["docker", "rm", "--force", "--volumes", name]
+    assert cli._started.killed
+    assert not cli.ran("inspect")  # No result is built for a cancelled execution.

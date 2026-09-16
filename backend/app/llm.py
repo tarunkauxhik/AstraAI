@@ -30,6 +30,10 @@ class RetryableLLMError(LLMError):
         self.retry_after = retry_after
 
 
+class LLMOutputError(RetryableLLMError):
+    """The model answered, but not with valid structured output for the schema."""
+
+
 def retry_after_seconds(response: httpx2.Response) -> float | None:
     """The response's numeric Retry-After, if at most MAX_RETRY_AFTER_SECONDS."""
     try:
@@ -185,7 +189,7 @@ class LLMClient:
                 tool_name,
                 choice.finish_reason if choice else None,
             )
-            raise RetryableLLMError("LLM returned invalid structured output")
+            raise LLMOutputError("LLM returned invalid structured output")
         try:
             return schema.model_validate_json(arguments)
         except ValidationError as exc:
@@ -202,7 +206,7 @@ class LLMClient:
             error.error_count(),
             [(detail["type"], detail["loc"]) for detail in error.errors()[:3]],
         )
-        raise RetryableLLMError("LLM returned invalid structured output") from error
+        raise LLMOutputError("LLM returned invalid structured output") from error
 
     async def close(self) -> None:
         await self._client.close()

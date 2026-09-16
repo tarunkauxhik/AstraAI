@@ -15,4 +15,11 @@ def llm_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("OPENAI_MODEL", "test-model")
     monkeypatch.delenv("LLM_MAX_ATTEMPTS", raising=False)
     monkeypatch.delenv("LLM_MAX_CONCURRENCY", raising=False)
+    for name in (
+        "RUN_MAX_ACTIVE_RUNS",
+        "RUN_MAX_QUEUED_RUNS",
+        "RUN_MAX_RETAINED_RUNS",
+        "RUN_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LLM_RETRY_BACKOFF_SECONDS", "0")

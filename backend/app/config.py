@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     sandbox_max_output_bytes: int = Field(default=64_000, ge=1_000, le=1_000_000)
     sandbox_max_concurrency: int = Field(default=1, ge=1, le=4)
 
+    # Run lifecycle. One full agent run at a time: each one already holds LLM calls and a
+    # sandbox, and the target is a small VPS.
+    run_max_active_runs: int = Field(default=1, ge=1, le=4)
+    run_max_queued_runs: int = Field(default=10, ge=1, le=100)
+    run_max_retained_runs: int = Field(default=100, ge=10, le=1000)
+    # Caps the whole graph run; per-LLM-call and sandbox timeouts still apply inside it.
+    run_timeout_seconds: float = Field(default=300, ge=30, le=3600)
+
 
 @lru_cache
 def get_settings() -> Settings:

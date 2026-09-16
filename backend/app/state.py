@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Literal, NotRequired, Self, TypedDict
+from typing import Literal, NotRequired, Self, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -145,6 +145,44 @@ class ExecutionResult(BaseModel):
     output_truncated: bool = False
 
 
+CriticVerdict = Literal[
+    "pass", "code_failure", "test_failure", "execution_failure", "ambiguous"
+]
+RecommendedAction = Literal[
+    "accept", "revise_code", "revise_tests", "retry_execution", "needs_human_review"
+]
+
+
+class CriticResult(BaseModel):
+    """Judgement of whether the implementation meets the requirements, from the evidence.
+
+    Flat strings only, with nowhere to put replacement code or tests.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: CriticVerdict
+    reason: str = Field(
+        min_length=1, description="The evidence-based explanation for the verdict."
+    )
+    code_issue: str = Field(
+        description="What the implementation gets wrong, or an empty string."
+    )
+    test_issue: str = Field(
+        description="Which expected result contradicts the requirements and why, "
+        "or an empty string."
+    )
+    recommended_action: RecommendedAction
+
+    @model_validator(mode="after")
+    def only_a_pass_is_accepted(self) -> Self:
+        if (self.verdict == "pass") != (self.recommended_action == "accept"):
+            raise ValueError(
+                "recommended_action is accept exactly when verdict is pass"
+            )
+        return self
+
+
 class AgentState(TypedDict):
     """State shared by every node of an AstraAi run."""
 
@@ -155,7 +193,7 @@ class AgentState(TypedDict):
     generated_tests: NotRequired[GeneratedTests]
     generated_code: NotRequired[GeneratedCode]
     execution_result: NotRequired[ExecutionResult]
-    critic_result: NotRequired[dict[str, Any]]
+    critic_result: NotRequired[CriticResult]
     attempt_count: NotRequired[int]
     max_attempts: NotRequired[int]
     status: NotRequired[Literal["pending", "running", "succeeded", "failed"]]

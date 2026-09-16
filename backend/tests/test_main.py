@@ -1,40 +1,52 @@
-from collections.abc import Callable, Iterator
+import time
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-import httpx2
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.main import app, get_llm, get_sandbox
+from app.main import app
+from app.sandbox.executor import SandboxExecutor
 from tests.fake_llm import (
+    VALID_CRITIC_RESULT,
     VALID_GENERATED_TESTS,
     VALID_PYTHON_CODE,
     VALID_REQUIREMENTS,
-    VALID_REQUIREMENTS_JSON,
     WORKFLOW_REPLIES,
     Reply,
-    fake_llm,
-    timeout,
 )
+from tests.fake_runs import hold_forever, manager_factory, poll
 from tests.fake_sandbox import PASSED, FakeSandbox
 
-# Python: the workflow fixtures generate Python code, and the node checks the match.
+# Python: the workflow fixtures generate Python code, and the sandbox node checks the match.
 VALID_RUN = {"task": "Reverse a string.", "language": "python"}
+Api = Callable[..., TestClient]
 
 
 @pytest.fixture
-def client_with_llm() -> Iterator[Callable[[Reply], TestClient]]:
-    """TestClient whose runs use a fake LLM answering with the given reply."""
+def api(monkeypatch: pytest.MonkeyPatch) -> Api:
+    """TestClient whose run manager uses fake LLM and sandbox components."""
 
-    def make(reply: Reply) -> TestClient:
-        app.dependency_overrides[get_llm] = lambda: fake_llm(reply)
-        app.dependency_overrides[get_sandbox] = lambda: FakeSandbox()
+    def make(
+        reply: Reply = WORKFLOW_REPLIES,
+        sandbox: Callable[[], SandboxExecutor] = FakeSandbox,
+        max_queued_runs: int = 10,
+    ) -> TestClient:
+        factory = manager_factory(reply, sandbox, max_queued_runs=max_queued_runs)
+        monkeypatch.setattr("app.main.build_run_manager", factory)
         return TestClient(app)
 
-    yield make
-    app.dependency_overrides.clear()
+    return make
+
+
+def running(run: dict[str, Any]) -> bool:
+    return run["status"] == "running"
+
+
+def finished(run: dict[str, Any]) -> bool:
+    return run["status"] in ("completed", "failed")
 
 
 def test_health_reports_running() -> None:
@@ -52,19 +64,105 @@ def test_startup_fails_without_llm_config(monkeypatch: pytest.MonkeyPatch) -> No
         pass
 
 
-def test_create_run_returns_requirements_and_generated_tests(
-    client_with_llm: Callable[[Reply], TestClient],
-) -> None:
-    with client_with_llm(WORKFLOW_REPLIES) as client:
+def test_post_returns_202_without_waiting_for_the_workflow(api: Api) -> None:
+    with api(hold_forever) as client:
+        started = time.monotonic()
         response = client.post("/runs", json=VALID_RUN)
+        elapsed = time.monotonic() - started
 
-    assert response.status_code == 200
-    body = response.json()
-    assert UUID(body["run_id"])
-    assert body["requirements"] == VALID_REQUIREMENTS
-    assert body["generated_tests"] == VALID_GENERATED_TESTS
-    assert body["generated_code"] == VALID_PYTHON_CODE
-    assert body["execution_result"] == PASSED.model_dump()
+        assert response.status_code == 202
+        body = response.json()
+        assert body == {"run_id": body["run_id"], "status": "queued"}
+        assert UUID(body["run_id"])
+        assert elapsed < 1.0
+
+        run = poll(client, body["run_id"], running)
+        assert run["stage"] == "analyzing"
+        assert run["requirements"] is None
+
+
+def test_get_queued_run_while_another_runs(api: Api) -> None:
+    with api(hold_forever) as client:
+        first = client.post("/runs", json=VALID_RUN).json()["run_id"]
+        poll(client, first, running)
+
+        second = client.post("/runs", json=VALID_RUN).json()["run_id"]
+        run = client.get(f"/runs/{second}").json()
+
+    assert (run["status"], run["stage"]) == ("queued", "queued")
+    assert run["generated_code"] is None
+
+
+def test_completed_run_exposes_every_result(api: Api) -> None:
+    with api() as client:
+        run_id = client.post("/runs", json=VALID_RUN).json()["run_id"]
+        run = poll(client, run_id, finished)
+
+    assert (run["status"], run["stage"], run["error"]) == (
+        "completed",
+        "completed",
+        None,
+    )
+    assert (run["task"], run["language"]) == (VALID_RUN["task"], "python")
+    assert run["requirements"] == VALID_REQUIREMENTS
+    assert run["generated_tests"] == VALID_GENERATED_TESTS
+    assert run["generated_code"] == VALID_PYTHON_CODE
+    assert run["execution_result"] == PASSED.model_dump()
+    assert run["critic_result"] == VALID_CRITIC_RESULT
+
+
+def test_failed_run_keeps_earlier_results_and_a_safe_error(api: Api) -> None:
+    with api({**WORKFLOW_REPLIES, "GeneratedTests": "not json"}) as client:
+        run_id = client.post("/runs", json=VALID_RUN).json()["run_id"]
+        run = poll(client, run_id, finished)
+
+    assert (run["status"], run["stage"]) == ("failed", "failed")
+    assert run["error"] == {
+        "code": "llm_failed",
+        "message": "The language model request failed or returned unusable output.",
+        "stage": "generating_tests",
+    }
+    assert run["requirements"] == VALID_REQUIREMENTS
+    assert run["generated_tests"] is None
+
+
+def test_unexpected_failure_exposes_no_internals(api: Api) -> None:
+    def exploding_sandbox() -> FakeSandbox:
+        return FakeSandbox(RuntimeError("Traceback: /var/run/docker.sock denied"))
+
+    with api(sandbox=exploding_sandbox) as client:
+        run_id = client.post("/runs", json=VALID_RUN).json()["run_id"]
+        poll(client, run_id, finished)
+        response = client.get(f"/runs/{run_id}")
+
+    run = response.json()
+    assert run["error"]["code"] == "internal_error"
+    assert run["error"]["stage"] == "executing"
+    for internal in ("Traceback", "docker.sock", "RuntimeError"):
+        assert internal not in response.text
+
+
+def test_unknown_run_is_404(api: Api) -> None:
+    with api() as client:
+        response = client.get("/runs/does-not-exist")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Run not found."}
+
+
+def test_full_queue_returns_429(api: Api) -> None:
+    with api(hold_forever, max_queued_runs=1) as client:
+        active = client.post("/runs", json=VALID_RUN).json()["run_id"]
+        poll(client, active, running)
+        waiting = client.post("/runs", json=VALID_RUN)
+        rejected = client.post("/runs", json=VALID_RUN)
+
+    assert waiting.status_code == 202
+    assert rejected.status_code == 429
+    assert rejected.headers["retry-after"] == "30"
+    assert rejected.json() == {
+        "detail": "Too many runs are waiting. Try again shortly."
+    }
 
 
 @pytest.mark.parametrize(
@@ -81,47 +179,19 @@ def test_create_run_returns_requirements_and_generated_tests(
         ),
     ],
 )
-def test_create_run_rejects_invalid_request(
-    client_with_llm: Callable[[Reply], TestClient], payload: dict[str, Any]
-) -> None:
-    with client_with_llm(WORKFLOW_REPLIES) as client:
+def test_invalid_request_is_422(api: Api, payload: dict[str, Any]) -> None:
+    with api() as client:
         response = client.post("/runs", json=payload)
 
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize(
-    ("reply", "status_code", "detail"),
-    [
-        pytest.param(
-            "not json",
-            502,
-            "LLM returned invalid structured output",
-            id="invalid-requirements",
-        ),
-        pytest.param(
-            {"Requirements": VALID_REQUIREMENTS_JSON, "GeneratedTests": "not json"},
-            502,
-            "LLM returned invalid structured output",
-            id="invalid-generated-tests",
-        ),
-        pytest.param(
-            lambda request: httpx2.Response(500),
-            502,
-            "LLM request failed",
-            id="failure",
-        ),
-        pytest.param(timeout, 504, "LLM request timed out", id="timeout"),
-    ],
-)
-def test_create_run_maps_llm_errors(
-    client_with_llm: Callable[[Reply], TestClient],
-    reply: Reply,
-    status_code: int,
-    detail: str,
-) -> None:
-    with client_with_llm(reply) as client:
+def test_post_during_shutdown_returns_503(api: Api) -> None:
+    with api() as client:
+        client.portal.call(app.state.runs.stop)
         response = client.post("/runs", json=VALID_RUN)
 
-    assert response.status_code == status_code
-    assert response.json() == {"detail": detail}
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "The service is shutting down. Try again shortly."
+    }

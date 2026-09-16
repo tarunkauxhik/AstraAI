@@ -1,6 +1,7 @@
 """Runs generated code in a throwaway, locked-down Docker container."""
 
 import asyncio
+import contextlib
 import io
 import logging
 import re
@@ -150,7 +151,8 @@ class DockerSandbox:
             exit_code, out_of_memory = await self._inspect(name)
             return self._result(run, exit_code, out_of_memory, started)
         finally:
-            await self._cleanup(name)
+            # Shielded: a second cancellation must not abort removing the container.
+            await asyncio.shield(self._cleanup(name))
 
     async def _docker(self, *args: str) -> Completed:
         try:
@@ -191,6 +193,17 @@ class DockerSandbox:
         except TimeoutError:
             timed_out = True
             await self._docker("kill", name)
+        except asyncio.CancelledError:
+            # The run was cancelled (run timeout or shutdown): stop reading and stop the
+            # docker client. The caller's finally still removes the container.
+            streams.cancel()
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            # Collect the cancelled readers so asyncio does not warn about them; the
+            # original cancellation is re-raised either way.
+            with contextlib.suppress(asyncio.CancelledError):
+                await streams
+            raise
         (stdout, out_cut), (stderr, err_cut) = await streams
         await process.wait()
         return Run(stdout, stderr, timed_out, out_cut or err_cut)
