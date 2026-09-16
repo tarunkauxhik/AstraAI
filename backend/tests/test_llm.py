@@ -199,6 +199,11 @@ def test_generate_retries_once_then_succeeds(
             lambda: tool_call("not json"), "invalid structured output", id="output"
         ),
         pytest.param(lambda: httpx2.Response(502), "request failed", id="http-502"),
+        pytest.param(
+            lambda: httpx2.Response(429, headers={"retry-after": "0"}),
+            "request failed",
+            id="http-429",
+        ),
     ],
 )
 def test_generate_gives_up_after_max_attempts(
@@ -260,6 +265,76 @@ def test_generate_follows_configured_attempts_and_linear_backoff(
     assert generate(llm) == REQUIREMENTS
     assert len(requests) == 3
     assert delays == [0.5, 1.0]
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_delay"),
+    [
+        pytest.param("2", 2.0, id="seconds"),
+        pytest.param("0.5", 0.5, id="fractional-seconds"),
+        pytest.param(None, 0.25, id="missing-uses-backoff"),
+        pytest.param("120", 0.25, id="too-long-uses-backoff"),
+        pytest.param("Wed, 21 Oct 2026 07:28:00 GMT", 0.25, id="date-uses-backoff"),
+        pytest.param("soon", 0.25, id="unparsable-uses-backoff"),
+    ],
+)
+def test_generate_waits_for_retry_after_on_429(
+    monkeypatch: pytest.MonkeyPatch, retry_after: str | None, expected_delay: float
+) -> None:
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_SECONDS", "0.25")
+    delays: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("app.llm.asyncio.sleep", record_sleep)
+    headers = {} if retry_after is None else {"retry-after": retry_after}
+    llm, requests = scripted(httpx2.Response(429, headers=headers), valid())
+
+    assert generate(llm) == REQUIREMENTS
+    assert len(requests) == 2
+    assert delays == [expected_delay]
+
+
+def test_generate_ignores_retry_after_on_other_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_SECONDS", "0.25")
+    delays: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("app.llm.asyncio.sleep", record_sleep)
+    llm, _ = scripted(httpx2.Response(503, headers={"retry-after": "5"}), valid())
+
+    assert generate(llm) == REQUIREMENTS
+    assert delays == [0.25]
+
+
+def test_generate_never_exceeds_the_concurrency_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "3")
+    in_flight = 0
+    peak = 0
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return valid()
+
+    llm = fake_llm(handler)
+
+    async def generate_six() -> list[Requirements]:
+        calls = (llm.generate("Analyze.", "task", Requirements) for _ in range(6))
+        return await asyncio.gather(*calls)
+
+    assert asyncio.run(generate_six()) == [REQUIREMENTS] * 6
+    assert peak == 3
 
 
 def test_generate_single_attempt_setting_disables_retries(

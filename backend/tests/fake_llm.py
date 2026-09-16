@@ -56,10 +56,75 @@ VALID_GENERATED_TESTS = {
 }
 VALID_GENERATED_TESTS_JSON = json.dumps(VALID_GENERATED_TESTS)
 
+# Representative generated code, as stored in state and returned by the API.
+VALID_PYTHON_CODE = {
+    "language": "python",
+    "solution_code": """def reverse(s: str) -> str:
+    return s[::-1]
+""",
+    "test_code": """import sys
+
+from solution import reverse
+
+CASES = [
+    ("basic_word", "abc", "cba"),
+    ("empty_string", "", ""),
+    ("single_character", "x", "x"),
+]
+
+failures = 0
+for name, value, expected in CASES:
+    actual = reverse(value)
+    if actual != expected:
+        print(f"FAIL {name}: expected {expected!r}, got {actual!r}")
+        failures += 1
+
+if failures:
+    sys.exit(1)
+print(f"PASSED {len(CASES)} tests")
+""",
+    "explanation": "Slicing with a negative step reverses the string.",
+}
+VALID_PYTHON_CODE_JSON = json.dumps(VALID_PYTHON_CODE)
+
+VALID_CPP_CODE = {
+    "language": "cpp",
+    "solution_code": """#include <string>
+
+std::string reverse_string(const std::string& s) {
+    return std::string(s.rbegin(), s.rend());
+}
+""",
+    # Raw string: the escape sequences belong to the generated C++ source, not to this file.
+    "test_code": r"""#include "solution.cpp"
+
+#include <iostream>
+#include <string>
+
+int main() {
+    int failures = 0;
+    const std::string actual = reverse_string("abc");
+    if (actual != "cba") {
+        std::cout << "FAIL basic_word: expected cba, got " << actual << "\n";
+        ++failures;
+    }
+    if (failures != 0) {
+        return 1;
+    }
+    std::cout << "PASSED 1 tests\n";
+    return 0;
+}
+""",
+    "explanation": "Reverse iterators build the reversed string.",
+}
+VALID_CPP_CODE_JSON = json.dumps(VALID_CPP_CODE)
+
+
 # Valid tool arguments for every node of the workflow, keyed by tool name.
 WORKFLOW_REPLIES = {
     "Requirements": VALID_REQUIREMENTS_JSON,
     "GeneratedTests": VALID_GENERATED_TESTS_JSON,
+    "GeneratedCode": VALID_PYTHON_CODE_JSON,
 }
 
 # Reasoning the live MiniMax gateway leaves in `content` next to a tool call.

@@ -15,7 +15,10 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-markers = ["live: calls the real LLM; skipped unless ASTRAAI_LIVE_LLM=1"]
+markers = [
+    "live: calls the real LLM; skipped unless ASTRAAI_LIVE_LLM=1",
+    "docker: uses the local Docker daemon; skipped unless ASTRAAI_DOCKER_TESTS=1",
+]
 
 [dependency-groups]
 dev = [

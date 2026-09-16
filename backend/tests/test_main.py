@@ -7,9 +7,10 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.main import app, get_llm
+from app.main import app, get_llm, get_sandbox
 from tests.fake_llm import (
     VALID_GENERATED_TESTS,
+    VALID_PYTHON_CODE,
     VALID_REQUIREMENTS,
     VALID_REQUIREMENTS_JSON,
     WORKFLOW_REPLIES,
@@ -17,8 +18,10 @@ from tests.fake_llm import (
     fake_llm,
     timeout,
 )
+from tests.fake_sandbox import PASSED, FakeSandbox
 
-VALID_RUN = {"task": "Reverse a string.", "language": "cpp"}
+# Python: the workflow fixtures generate Python code, and the node checks the match.
+VALID_RUN = {"task": "Reverse a string.", "language": "python"}
 
 
 @pytest.fixture
@@ -27,6 +30,7 @@ def client_with_llm() -> Iterator[Callable[[Reply], TestClient]]:
 
     def make(reply: Reply) -> TestClient:
         app.dependency_overrides[get_llm] = lambda: fake_llm(reply)
+        app.dependency_overrides[get_sandbox] = lambda: FakeSandbox()
         return TestClient(app)
 
     yield make
@@ -59,6 +63,8 @@ def test_create_run_returns_requirements_and_generated_tests(
     assert UUID(body["run_id"])
     assert body["requirements"] == VALID_REQUIREMENTS
     assert body["generated_tests"] == VALID_GENERATED_TESTS
+    assert body["generated_code"] == VALID_PYTHON_CODE
+    assert body["execution_result"] == PASSED.model_dump()
 
 
 @pytest.mark.parametrize(

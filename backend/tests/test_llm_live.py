@@ -12,6 +12,7 @@ from app.config import Settings
 from app.graph import build_graph
 from app.llm import LLMClient
 from app.state import GraphContext
+from tests.fake_sandbox import FakeSandbox
 
 pytestmark = [
     pytest.mark.live,
@@ -24,7 +25,8 @@ pytestmark = [
 
 def test_workflow_with_real_llm() -> None:
     task = "Given an array of integers and a target, return indices of two numbers summing to it."
-    context = GraphContext(llm=LLMClient(Settings()))
+    # The sandbox is faked here: this test covers the gateway, not Docker.
+    context = GraphContext(llm=LLMClient(Settings()), sandbox=FakeSandbox())
 
     state = asyncio.run(
         build_graph().ainvoke(
@@ -35,3 +37,9 @@ def test_workflow_with_real_llm() -> None:
 
     assert state["requirements"].functional_requirements
     assert state["generated_tests"].cases
+    generated_code = state["generated_code"]
+    assert generated_code.language == "cpp"
+    assert generated_code.solution_code.strip()
+    assert generated_code.test_code.strip()
+    assert "```" not in generated_code.solution_code + generated_code.test_code
+    assert "main(" in generated_code.test_code

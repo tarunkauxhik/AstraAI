@@ -12,6 +12,7 @@ from tests.fake_llm import (
     fake_llm,
     tool_call,
 )
+from tests.fake_sandbox import FakeSandbox
 
 
 def test_analyze_task_returns_requirements_from_llm() -> None:
@@ -21,7 +22,9 @@ def test_analyze_task_returns_requirements_from_llm() -> None:
         prompts.append(json.loads(request.content)["messages"][1]["content"])
         return tool_call(VALID_REQUIREMENTS_JSON)
 
-    runtime = Runtime(context=GraphContext(llm=fake_llm(handler)))
+    runtime = Runtime(
+        context=GraphContext(llm=fake_llm(handler), sandbox=FakeSandbox())
+    )
     state = {"run_id": "run-1", "task": "Reverse a string.", "language": "python"}
 
     update = asyncio.run(analyze_task(state, runtime))

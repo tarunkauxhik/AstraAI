@@ -10,7 +10,16 @@ from pydantic import BaseModel, StringConstraints
 from app.config import get_settings
 from app.graph import build_graph
 from app.llm import LLMClient, LLMError, LLMTimeoutError
-from app.state import GeneratedTests, GraphContext, Language, Requirements
+from app.sandbox.docker import DockerSandbox
+from app.sandbox.executor import SandboxExecutor
+from app.state import (
+    ExecutionResult,
+    GeneratedCode,
+    GeneratedTests,
+    GraphContext,
+    Language,
+    Requirements,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +40,16 @@ class RunResponse(BaseModel):
     run_id: str
     requirements: Requirements
     generated_tests: GeneratedTests
+    generated_code: GeneratedCode
+    execution_result: ExecutionResult
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # One shared client per process; fails fast on missing or invalid configuration.
-    app.state.llm = LLMClient(get_settings())
+    # One shared client and sandbox per process; fails fast on bad configuration.
+    settings = get_settings()
+    app.state.llm = LLMClient(settings)
+    app.state.sandbox = DockerSandbox(settings)
     yield
     await app.state.llm.close()
 
@@ -49,6 +62,10 @@ def get_llm(request: Request) -> LLMClient:
     return request.app.state.llm
 
 
+def get_sandbox(request: Request) -> SandboxExecutor:
+    return request.app.state.sandbox
+
+
 @app.get("/health")
 async def health() -> HealthResponse:
     return HealthResponse(status="ok", service="astraai")
@@ -56,13 +73,15 @@ async def health() -> HealthResponse:
 
 @app.post("/runs")
 async def create_run(
-    run: RunRequest, llm: Annotated[LLMClient, Depends(get_llm)]
+    run: RunRequest,
+    llm: Annotated[LLMClient, Depends(get_llm)],
+    sandbox: Annotated[SandboxExecutor, Depends(get_sandbox)],
 ) -> RunResponse:
     run_id = str(uuid4())
     try:
         state = await graph.ainvoke(
             {"run_id": run_id, "task": run.task, "language": run.language},
-            context=GraphContext(llm=llm),
+            context=GraphContext(llm=llm, sandbox=sandbox),
         )
     except LLMError as exc:
         logger.warning("Run %s failed: %s", run_id, exc)
@@ -72,4 +91,6 @@ async def create_run(
         run_id=run_id,
         requirements=state["requirements"],
         generated_tests=state["generated_tests"],
+        generated_code=state["generated_code"],
+        execution_result=state["execution_result"],
     )

@@ -4,8 +4,16 @@ from typing import Any, Literal, NotRequired, Self, TypedDict
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.llm import LLMClient
+from app.sandbox.executor import SandboxExecutor
 
 Language = Literal["python", "cpp"]
+ExecutionStatus = Literal[
+    "passed",
+    "failed",
+    "timed_out",
+    "resource_exceeded",
+    "infrastructure_error",
+]
 CaseCategory = Literal[
     "basic",
     "boundary",
@@ -91,6 +99,52 @@ class GeneratedTests(BaseModel):
         return self
 
 
+class GeneratedCode(BaseModel):
+    """Runnable solution and test code, kept as flat strings for the sandbox to write out.
+
+    Python lands in solution.py and test_solution.py, C++ in solution.cpp and
+    test_solution.cpp. The test program exits 0 only when every case passes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    language: Language
+    solution_code: str = Field(
+        min_length=1,
+        description="The implementation only: no test code, no entry point that runs on "
+        "import or start-up, no markdown fences.",
+    )
+    test_code: str = Field(
+        min_length=1,
+        description="A standalone program that runs every case in the test plan, prints "
+        "FAIL <case_name>: expected <expected>, got <actual> for each failure, and exits "
+        "non-zero when any case fails. No markdown fences.",
+    )
+    explanation: str = Field(
+        description="Short note on the approach, and any conflict found with the test plan."
+    )
+
+
+class ExecutionResult(BaseModel):
+    """What happened when the generated tests ran in the sandbox."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: ExecutionStatus
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    duration_ms: int = 0
+    tests_passed: int | None = None
+    tests_failed: int | None = None
+    error_type: str | None = Field(
+        default=None,
+        description="compile_error, test_failure, runtime_error, timeout, "
+        "out_of_memory, or a sandbox infrastructure failure.",
+    )
+    output_truncated: bool = False
+
+
 class AgentState(TypedDict):
     """State shared by every node of an AstraAi run."""
 
@@ -99,8 +153,8 @@ class AgentState(TypedDict):
     language: Language
     requirements: NotRequired[Requirements]
     generated_tests: NotRequired[GeneratedTests]
-    generated_code: NotRequired[str]
-    execution_result: NotRequired[dict[str, Any]]
+    generated_code: NotRequired[GeneratedCode]
+    execution_result: NotRequired[ExecutionResult]
     critic_result: NotRequired[dict[str, Any]]
     attempt_count: NotRequired[int]
     max_attempts: NotRequired[int]
@@ -113,3 +167,4 @@ class GraphContext:
     """Run-scoped dependencies for nodes, kept out of the graph state."""
 
     llm: LLMClient
+    sandbox: SandboxExecutor

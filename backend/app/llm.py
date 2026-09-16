@@ -10,6 +10,9 @@ from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
+# Longest Retry-After we wait for; longer or non-numeric values fall back to the backoff.
+MAX_RETRY_AFTER_SECONDS = 30.0
+
 
 class LLMError(Exception):
     """The LLM request failed or returned output that does not match the schema."""
@@ -21,6 +24,19 @@ class LLMTimeoutError(LLMError):
 
 class RetryableLLMError(LLMError):
     """Invalid structured output or a transient gateway failure: worth another attempt."""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def retry_after_seconds(response: httpx2.Response) -> float | None:
+    """The response's numeric Retry-After, if at most MAX_RETRY_AFTER_SECONDS."""
+    try:
+        seconds = float(response.headers.get("retry-after", ""))
+    except ValueError:
+        return None
+    return seconds if 0 <= seconds <= MAX_RETRY_AFTER_SECONDS else None
 
 
 def restore_coerced_strings(arguments: str, error: ValidationError) -> object | None:
@@ -59,6 +75,8 @@ class LLMClient:
         self._model = settings.openai_model
         self._max_attempts = settings.llm_max_attempts
         self._retry_backoff_seconds = settings.llm_retry_backoff_seconds
+        # The app creates one client per process, so this caps all outbound LLM calls.
+        self._requests = asyncio.Semaphore(settings.llm_max_concurrency)
         self._client = openai.AsyncOpenAI(
             base_url=str(settings.openai_base_url),
             api_key=settings.openai_api_key.get_secret_value(),
@@ -73,7 +91,8 @@ class LLMClient:
         """Return `schema` validated from a forced tool call, with bounded retries.
 
         Invalid output and transient gateway failures (5xx, 408, 429, connection errors)
-        get another attempt after a linear backoff. Timeouts and other 4xx errors do not.
+        get another attempt after a linear backoff, or after a 429's short Retry-After.
+        Timeouts and other 4xx errors do not.
         """
         attempt = 1
         while True:
@@ -85,7 +104,11 @@ class LLMClient:
                         "LLM call gave up after %d attempt(s): %s", attempt, exc
                     )
                     raise
-                delay = self._retry_backoff_seconds * attempt
+                delay = (
+                    exc.retry_after
+                    if exc.retry_after is not None
+                    else self._retry_backoff_seconds * attempt
+                )
                 logger.warning(
                     "LLM attempt %d/%d failed: %s; retrying in %.1fs",
                     attempt,
@@ -106,24 +129,25 @@ class LLMClient:
         """
         tool_name = schema.__name__
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": instructions},
-                    {"role": "user", "content": prompt},
-                ],
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "description": f"Submit the {tool_name}.",
-                            "parameters": schema.model_json_schema(),
-                        },
-                    }
-                ],
-                tool_choice={"type": "function", "function": {"name": tool_name}},
-            )
+            async with self._requests:
+                response = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": instructions},
+                        {"role": "user", "content": prompt},
+                    ],
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "description": f"Submit the {tool_name}.",
+                                "parameters": schema.model_json_schema(),
+                            },
+                        }
+                    ],
+                    tool_choice={"type": "function", "function": {"name": tool_name}},
+                )
         except openai.APITimeoutError as exc:
             logger.warning("LLM request timed out (model=%s)", self._model)
             raise LLMTimeoutError("LLM request timed out") from exc
@@ -134,9 +158,12 @@ class LLMClient:
                 exc.status_code,
                 self._model,
             )
-            transient = exc.status_code >= 500 or exc.status_code in (408, 429)
-            error_class = RetryableLLMError if transient else LLMError
-            raise error_class("LLM request failed") from exc
+            if exc.status_code < 500 and exc.status_code not in (408, 429):
+                raise LLMError("LLM request failed") from exc
+            retry_after = (
+                retry_after_seconds(exc.response) if exc.status_code == 429 else None
+            )
+            raise RetryableLLMError("LLM request failed", retry_after) from exc
         except openai.APIError as exc:
             logger.warning(
                 "LLM request failed: %s (model=%s)", type(exc).__name__, self._model

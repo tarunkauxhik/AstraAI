@@ -16,6 +16,7 @@ from tests.fake_llm import (
     fake_llm,
     tool_call,
 )
+from tests.fake_sandbox import FakeSandbox
 
 REQUIREMENTS = Requirements.model_validate(VALID_REQUIREMENTS)
 STATE = {
@@ -27,7 +28,11 @@ STATE = {
 
 
 def run_node(llm: LLMClient, state: dict[str, Any] = STATE) -> dict[str, Any]:
-    return asyncio.run(generate_tests(state, Runtime(context=GraphContext(llm=llm))))
+    return asyncio.run(
+        generate_tests(
+            state, Runtime(context=GraphContext(llm=llm, sandbox=FakeSandbox()))
+        )
+    )
 
 
 def plan(**changes: Any) -> str:
