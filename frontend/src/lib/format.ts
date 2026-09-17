@@ -17,15 +17,6 @@ export function formatDuration(ms: number): string {
   return `${minutes}m ${String(Math.floor(seconds % 60)).padStart(2, "0")}s`
 }
 
-/** "in 9 min", "2 min ago". Coarse on purpose: informational, never a deadline check. */
-export function formatRelative(iso: string, now: number = Date.now()): string {
-  const diff = new Date(iso).getTime() - now
-  if (Number.isNaN(diff)) return ""
-  const minutes = Math.round(Math.abs(diff) / 60_000)
-  const amount = minutes < 1 ? "less than a minute" : `${minutes} min`
-  return diff >= 0 ? `in ${amount}` : `${amount} ago`
-}
-
 /**
  * Test counts exactly as reported. The sandbox only prints a total when every case
  * passes, so a total is never invented from partial numbers.
@@ -40,11 +31,17 @@ export function formatTestCounts(
   return null
 }
 
+/**
+ * The headline test result: "8 / 8 tests passed" when every reported case passed, otherwise
+ * the counts as reported. Null when the sandbox reported no counts.
+ */
+export function formatTestResult(passed: number | null, failed: number | null): string | null {
+  if (passed !== null && failed === 0) return `${passed} / ${passed} tests passed`
+  return formatTestCounts(passed, failed)
+}
+
 /** "1 revision", "0 retries". Counts only: the frontend never claims a server-side limit. */
 export function formatCount(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`
 }
 
-export function shortId(runId: string): string {
-  return runId.slice(0, 8)
-}

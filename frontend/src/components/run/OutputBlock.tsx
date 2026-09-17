@@ -14,10 +14,10 @@ interface OutputBlockProps {
 export function OutputBlock({ label, text, defaultOpen, tone = "default" }: OutputBlockProps) {
   const lines = text.replace(/\n$/, "").split("\n").length
   return (
-    <details open={defaultOpen} className="group rounded-md border bg-[oklch(0.135_0.004_250)]">
+    <details open={defaultOpen} className="rounded-md border bg-[oklch(0.135_0.004_250)]">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 select-none [&::-webkit-details-marker]:hidden">
         <ChevronRight
-          className="size-3.5 text-muted-foreground transition-transform duration-150 group-open:rotate-90"
+          className="disclosure-chevron size-3.5 text-muted-foreground"
           aria-hidden="true"
         />
         <span className={cn("font-mono text-xs", tone === "error" ? "text-destructive" : "text-foreground")}>

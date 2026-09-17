@@ -130,6 +130,14 @@
 }
 
 @layer components {
+  /* A chevron turns only for its own <details>, never because an outer one is open. */
+  .disclosure-chevron {
+    transition: transform 150ms ease;
+  }
+  details[open] > summary > .disclosure-chevron {
+    transform: rotate(90deg);
+  }
+
   /* Compact section labels. */
   .label-caps {
     font-variant-caps: all-small-caps;

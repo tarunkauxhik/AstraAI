@@ -10,15 +10,13 @@ import {
   evidenceAttempt,
   executionAttempt,
   executionFreshness,
-  isVerified,
   pageState,
   pollInterval,
   POLL_MS,
   runPhase,
   showApprovalControls,
-  timeline,
-  verifyActivity,
-  verifyCounters,
+  progress,
+  workingNote,
 } from "@/lib/run-view"
 import {
   approvedThenFailedRun,
@@ -44,10 +42,6 @@ import {
 const httpError = (status: number, detail = "x") =>
   new ApiError({ kind: "http", status, detail })
 const networkError = () => new ApiError({ kind: "network", status: 0, detail: "offline" })
-
-function states(run: Run) {
-  return Object.fromEntries(timeline(run).map((step) => [step.id, step.state]))
-}
 
 describe("runPhase precedence", () => {
   it.each([
@@ -103,16 +97,6 @@ describe("approval visibility", () => {
   })
 })
 
-describe("verification", () => {
-  it("is verified only once the server accepted the result", () => {
-    expect(isVerified(reviewingRun)).toBe(false) // Tests passed, but not yet reviewed.
-    expect(isVerified(revisingRun)).toBe(false)
-    expect(isVerified(waitingRun)).toBe(true)
-    expect(isVerified(completedRun)).toBe(true)
-    expect(isVerified(needsReviewRun)).toBe(false)
-  })
-})
-
 describe("execution attempts", () => {
   it("counts the first run, revisions and retries", () => {
     expect(executionAttempt(executingRun)).toBe(1)
@@ -121,12 +105,16 @@ describe("execution attempts", () => {
     expect(executionAttempt({ ...completedRun, revision_count: 2, execution_retry_count: 1 })).toBe(4)
   })
 
-  it("describes the current verify activity", () => {
-    expect(verifyActivity(executingRun)).toBe("Running attempt 1")
-    expect(verifyActivity(reviewingRun)).toBe("Reviewing attempt 1")
-    expect(verifyActivity(revisingRun)).toBe("Repairing solution · revision 1")
-    expect(verifyActivity(reExecutingAfterRevisionRun)).toBe("Running attempt 2")
-    expect(verifyActivity(retryingExecutionRun)).toBe("Retrying attempt 2 after a sandbox error")
+  it("adds one sentence of context only when verification repeats", () => {
+    expect(workingNote(executingRun)).toBeNull()
+    expect(workingNote(reviewingRun)).toBeNull()
+    expect(workingNote(generatingRun)).toBeNull()
+    expect(workingNote(revisingRun)).toBe("Found an issue — repairing the solution (attempt 2).")
+    expect(workingNote({ ...revisingRun, stage: "revising_tests" })).toBe(
+      "Found an issue — repairing the tests (attempt 2).",
+    )
+    expect(workingNote(reExecutingAfterRevisionRun)).toBe("Checking the repaired version (attempt 2).")
+    expect(workingNote(retryingExecutionRun)).toBe("Verification didn't run — trying again (attempt 2).")
   })
 })
 
@@ -170,53 +158,46 @@ describe("stale evidence", () => {
   })
 })
 
-describe("timeline", () => {
-  it("has nothing active while queued", () => {
-    expect(Object.values(states(queuedRun))).toEqual(Array(6).fill("pending"))
+describe("progress", () => {
+  function states(run: Run) {
+    return Object.fromEntries(progress(run).steps.map((step) => [step.id, step.state]))
+  }
+
+  it("uses four plain steps", () => {
+    expect(progress(queuedRun).steps.map((step) => step.label)).toEqual(["Understand", "Build", "Verify", "Approve"])
   })
 
-  it("follows the current stage", () => {
-    expect(states(generatingRun)).toEqual({
-      analyze: "done",
-      test_plan: "done",
-      code: "active",
-      verify: "pending",
-      approval: "pending",
-      result: "pending",
-    })
-    expect(states(revisingRun).verify).toBe("active")
-    const verify = timeline(reExecutingAfterRevisionRun).find((step) => step.id === "verify")
-    expect(verify?.detail).toBe("Running attempt 2")
+  it.each([
+    ["queued", queuedRun, { understand: "upcoming", build: "upcoming", verify: "upcoming", approve: "upcoming" }],
+    ["analyzing", { ...queuedRun, status: "running", stage: "analyzing" }, { understand: "current", build: "upcoming", verify: "upcoming", approve: "upcoming" }],
+    ["generating tests", { ...generatingRun, stage: "generating_tests" }, { understand: "done", build: "current", verify: "upcoming", approve: "upcoming" }],
+    ["generating code", generatingRun, { understand: "done", build: "current", verify: "upcoming", approve: "upcoming" }],
+    ["executing", executingRun, { understand: "done", build: "done", verify: "current", approve: "upcoming" }],
+    ["reviewing", reviewingRun, { understand: "done", build: "done", verify: "current", approve: "upcoming" }],
+    ["revising code", revisingRun, { understand: "done", build: "done", verify: "current", approve: "upcoming" }],
+    ["revising tests", { ...revisingRun, stage: "revising_tests" }, { understand: "done", build: "done", verify: "current", approve: "upcoming" }],
+    ["waiting", waitingRun, { understand: "done", build: "done", verify: "done", approve: "current" }],
+    ["resuming", resumingRun, { understand: "done", build: "done", verify: "done", approve: "current" }],
+    ["completed", completedRun, { understand: "done", build: "done", verify: "done", approve: "done" }],
+  ] as [string, Run, Record<string, string>][])("maps %s", (_, run, expected) => {
+    expect(states(run)).toEqual(expected)
+    expect(progress(run).stopTone).toBeNull()
   })
 
-  it("marks approval active while waiting and done once resuming", () => {
-    expect(states(waitingRun).approval).toBe("active")
-    expect(states(resumingRun)).toMatchObject({ approval: "done", result: "active" })
+  it("marks where a failed run stopped, with a tone that matches the cause", () => {
+    expect(states(llmFailedRun)).toEqual({ understand: "done", build: "stopped", verify: "upcoming", approve: "upcoming" })
+    expect(progress(llmFailedRun).stopTone).toBe("danger")
+    // A rejection stops at approval and is neutral: verification itself succeeded.
+    expect(states(rejectedRun)).toEqual({ understand: "done", build: "done", verify: "done", approve: "stopped" })
+    expect(progress(rejectedRun).stopTone).toBe("neutral")
+    expect(progress(expiredRun).stopTone).toBe("warning")
+    expect(states(sandboxUnavailableRun).verify).toBe("stopped")
+    expect(progress(sandboxUnavailableRun).stopTone).toBe("neutral")
   })
 
-  it("marks everything done when completed", () => {
-    expect(Object.values(states(completedRun))).toEqual(Array(6).fill("done"))
-  })
-
-  it("marks where a failed run stopped, and the result", () => {
-    expect(states(llmFailedRun)).toEqual({
-      analyze: "done",
-      test_plan: "failed",
-      code: "pending",
-      verify: "pending",
-      approval: "pending",
-      result: "failed",
-    })
-    expect(states(rejectedRun)).toMatchObject({ verify: "done", approval: "failed", result: "failed" })
-    expect(states(needsReviewRun)).toMatchObject({ verify: "failed", approval: "pending" })
-    const result = timeline(rejectedRun).find((step) => step.id === "result")
-    expect(result?.detail).toBe("Approval rejected")
-  })
-
-  it("marks only the result when the run failed before starting", () => {
-    const failedStates = states(shutdownWhileQueuedRun)
-    expect(failedStates.analyze).toBe("pending")
-    expect(failedStates.result).toBe("failed")
+  it("marks nothing when the run stopped before starting", () => {
+    expect(Object.values(states(shutdownWhileQueuedRun))).toEqual(Array(4).fill("upcoming"))
+    expect(progress(shutdownWhileQueuedRun).stopTone).toBeNull()
   })
 })
 
@@ -280,40 +261,6 @@ describe("evidence attempts", () => {
     expect(evidenceAttempt(retryingExecutionRun, "stale")).toBe(1)
   })
 
-  it("summarizes server counters", () => {
-    expect(verifyCounters(executingRun)).toBe("Attempt 1")
-    expect(verifyCounters(reExecutingAfterRevisionRun)).toBe("Attempt 2 · 1 revision")
-    expect(verifyCounters(retryingExecutionRun)).toBe("Attempt 2 · 1 retry")
-    expect(verifyCounters({ ...completedRun, revision_count: 2, execution_retry_count: 1 })).toBe(
-      "Attempt 4 · 2 revisions · 1 retry",
-    )
-  })
-})
-
-describe("timeline decision outcomes", () => {
-  function step(run: Run, id: string) {
-    return timeline(run).find((item) => item.id === id)
-  }
-
-  it("shows a rejection as a neutral stop at approval, not a verification failure", () => {
-    expect(step(rejectedRun, "verify")).toMatchObject({ state: "done" })
-    expect(step(rejectedRun, "approval")).toMatchObject({
-      state: "failed",
-      detail: "Rejected",
-      tone: "neutral",
-    })
-  })
-
-  it("shows an expiry as Approval → Expired", () => {
-    expect(step(expiredRun, "approval")).toMatchObject({ state: "failed", detail: "Expired", tone: "warning" })
-    expect(step(expiredRun, "result")?.detail).toBe("Approval expired")
-  })
-
-  it("keeps real failures serious", () => {
-    expect(step(timedOutDuringReExecutionRun, "verify")).toMatchObject({ state: "failed", tone: "danger" })
-    expect(step(sandboxUnavailableRun, "verify")).toMatchObject({ state: "failed", tone: "neutral" })
-    expect(step(executingRun, "verify")?.tone).toBeNull()
-  })
 })
 
 describe("approvalCountdown", () => {

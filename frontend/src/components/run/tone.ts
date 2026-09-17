@@ -19,15 +19,6 @@ export const TONE_TEXT: Record<Tone, string> = {
   danger: "text-destructive",
 }
 
-/** Thin left accent for panels that carry an outcome. */
-export const TONE_ACCENT: Record<Tone, string> = {
-  neutral: "border-l-muted-foreground/40",
-  info: "border-l-info",
-  success: "border-l-success",
-  warning: "border-l-warning",
-  danger: "border-l-destructive",
-}
-
 /** Icon for an outcome of a given tone, so state never relies on color alone. */
 export const TONE_ICON: Record<Tone, LucideIcon> = {
   neutral: CircleSlash,

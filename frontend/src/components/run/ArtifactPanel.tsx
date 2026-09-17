@@ -1,12 +1,21 @@
-import type { ReactNode } from "react"
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { RefreshCw } from "lucide-react"
 
-import type { CaseCategory, GeneratedTestCase, GeneratedTests, Run, RunStage } from "@/api/types"
+import type { CaseCategory, GeneratedTestCase, Run, RunStage } from "@/api/types"
+import { Disclosure } from "@/components/Disclosure"
 import { CodeViewer } from "@/components/run/CodeViewer"
+import { VerificationDetails } from "@/components/run/VerificationDetails"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { formatCount } from "@/lib/format"
 import { LANGUAGE_LABELS } from "@/lib/labels"
+import { cn } from "@/lib/utils"
+
+export type ArtifactTab = "solution" | "tests" | "details"
+
+/** Tab panels take keyboard focus, so they need a visible focus ring. */
+const PANEL = "space-y-6 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
 
 const FILE_NAMES = {
   python: { solution: "solution.py", tests: "test_solution.py" },
@@ -23,18 +32,18 @@ const CATEGORY_LABELS: Record<CaseCategory, string> = {
   invalid_input: "Invalid input",
 }
 
-/** Empty state that says whether the artifact is being produced now, later, or never. */
-function Pending({ run, stage, what }: { run: Run; stage: RunStage; what: string }) {
-  const producing = run.status === "running" && run.stage === stage
+/** Quiet placeholder: whether the artifact is coming now, later, or never. */
+function Pending({ run, stages, what }: { run: Run; stages: RunStage[]; what: string }) {
+  const producing = run.status === "running" && stages.includes(run.stage)
   const text = producing
-    ? `AstraAi is producing the ${what} now.`
+    ? `AstraAi is working on the ${what}.`
     : run.status === "failed"
       ? `No ${what} was produced.`
-      : `The ${what} will appear here once AstraAi produces it.`
+      : `The ${what} will appear here.`
   return (
-    <div className="rounded-lg border border-dashed px-4 py-8 text-center">
+    <div className="space-y-3 py-6">
       {producing && (
-        <div className="mx-auto mb-4 max-w-sm space-y-2" aria-hidden="true">
+        <div className="max-w-md space-y-2" aria-hidden="true">
           <Skeleton className="h-3 w-3/4" />
           <Skeleton className="h-3 w-full" />
           <Skeleton className="h-3 w-2/3" />
@@ -45,30 +54,95 @@ function Pending({ run, stage, what }: { run: Run; stage: RunStage; what: string
   )
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Heading({ children }: { children: ReactNode }) {
+  return <h3 className="text-sm font-semibold">{children}</h3>
+}
+
+/** Inline `code` spans from the model's plain-text notes, rendered as text only. */
+function InlineCode({ text }: { text: string }) {
   return (
-    <section className="space-y-2">
-      <h3 className="label-caps">{title}</h3>
-      {children}
+    <>
+      {text.split(/(`[^`]+`)/).map((part, index) =>
+        part.startsWith("`") && part.endsWith("`") && part.length > 1 ? (
+          <code key={index} className="rounded bg-muted px-1 font-mono text-[0.85em] text-foreground">
+            {part.slice(1, -1)}
+          </code>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  )
+}
+
+/** Split a note into paragraphs and "- " / "* " bullet lists. */
+function noteBlocks(text: string): ({ kind: "p"; text: string } | { kind: "ul"; items: string[] })[] {
+  const blocks: ({ kind: "p"; text: string } | { kind: "ul"; items: string[] })[] = []
+  for (const raw of text.split("\n")) {
+    const line = raw.trim()
+    if (!line) continue
+    const bullet = /^[-*•]\s+(.*)$/.exec(line)
+    const last = blocks.at(-1)
+    if (bullet) {
+      if (last?.kind === "ul") last.items.push(bullet[1])
+      else blocks.push({ kind: "ul", items: [bullet[1]] })
+    } else {
+      blocks.push({ kind: "p", text: line })
+    }
+  }
+  return blocks
+}
+
+/** The model's explanation: readable, clamped to about three lines until expanded. */
+function Approach({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const [overflowing, setOverflowing] = useState(false)
+  const body = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const element = body.current
+    if (element && !expanded) setOverflowing(element.scrollHeight > element.clientHeight + 1)
+  }, [text, expanded])
+
+  return (
+    <section className="space-y-1.5">
+      <Heading>Approach</Heading>
+      <div
+        ref={body}
+        className={
+          "space-y-2 text-sm leading-6 text-muted-foreground " + (expanded ? "" : "max-h-18 overflow-hidden")
+        }
+      >
+        {noteBlocks(text).map((block, index) =>
+          block.kind === "p" ? (
+            <p key={index}>
+              <InlineCode text={block.text} />
+            </p>
+          ) : (
+            <ul key={index} className="list-disc space-y-1 pl-5">
+              {block.items.map((item, itemIndex) => (
+                <li key={itemIndex}>
+                  <InlineCode text={item} />
+                </li>
+              ))}
+            </ul>
+          ),
+        )}
+      </div>
+      {(overflowing || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          className="rounded-sm text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
     </section>
   )
 }
 
-function Bullets({ items, empty }: { items: string[]; empty: string }) {
-  if (items.length === 0) return <p className="text-sm text-muted-foreground">{empty}</p>
-  return (
-    <ul className="space-y-1.5 text-sm">
-      {items.map((item, index) => (
-        <li key={index} className="flex gap-2">
-          <span aria-hidden="true" className="mt-2 size-1 shrink-0 rounded-full bg-muted-foreground" />
-          <span>{item}</span>
-        </li>
-      ))}
-    </ul>
-  )
-}
-
-/** Literal test values: monospace, whitespace preserved, wrapping instead of overflowing. */
 function Literal({ children }: { children: string }) {
   return (
     <code className="block rounded bg-muted px-2 py-1 font-mono text-xs leading-5 break-all whitespace-pre-wrap">
@@ -77,68 +151,72 @@ function Literal({ children }: { children: string }) {
   )
 }
 
-function TestCaseCard({ testCase, index }: { testCase: GeneratedTestCase; index: number }) {
+function TestCaseRow({ testCase }: { testCase: GeneratedTestCase }) {
   return (
-    <li className="space-y-2 px-3 py-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-xs text-muted-foreground">{String(index + 1).padStart(2, "0")}</span>
-        <span className="font-mono text-[13px] font-medium">{testCase.name}</span>
-        <Badge variant="outline" className="rounded-md text-muted-foreground">
-          {CATEGORY_LABELS[testCase.category] ?? testCase.category}
-        </Badge>
-      </div>
-      <p className="text-sm text-muted-foreground">{testCase.description}</p>
-      <dl className="grid gap-x-3 gap-y-1.5 sm:grid-cols-[5.5rem_minmax(0,1fr)]">
-        {testCase.input && (
-          <>
-            <dt className="text-xs text-muted-foreground sm:pt-1">Input</dt>
+    <li className="py-2">
+      <Disclosure
+        summary={
+          <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+            <span className="font-mono text-[13px] text-foreground">{testCase.name}</span>
+            <span className="text-xs">{CATEGORY_LABELS[testCase.category] ?? testCase.category}</span>
+          </span>
+        }
+      >
+        <div className="space-y-2 pl-5.5">
+          <p className="text-sm text-muted-foreground">{testCase.description}</p>
+          <dl className="grid gap-x-3 gap-y-1.5 sm:grid-cols-[5.5rem_minmax(0,1fr)]">
+            {testCase.input && (
+              <>
+                <dt className="text-xs text-muted-foreground sm:pt-1">Input</dt>
+                <dd>
+                  <Literal>{testCase.input}</Literal>
+                </dd>
+              </>
+            )}
+            {testCase.input_generator && (
+              <>
+                <dt className="text-xs text-muted-foreground sm:pt-1">Generated</dt>
+                <dd>
+                  <Literal>{testCase.input_generator}</Literal>
+                </dd>
+              </>
+            )}
+            <dt className="text-xs text-muted-foreground sm:pt-1">Expected</dt>
             <dd>
-              <Literal>{testCase.input}</Literal>
+              <Literal>{testCase.expected_output}</Literal>
             </dd>
-          </>
-        )}
-        {testCase.input_generator && (
-          <>
-            <dt className="text-xs text-muted-foreground sm:pt-1">Generated</dt>
-            <dd>
-              <Literal>{testCase.input_generator}</Literal>
-            </dd>
-          </>
-        )}
-        <dt className="text-xs text-muted-foreground sm:pt-1">Expected</dt>
-        <dd>
-          <Literal>{testCase.expected_output}</Literal>
-        </dd>
-      </dl>
+          </dl>
+        </div>
+      </Disclosure>
     </li>
   )
 }
 
-function PlanSummary({ plan }: { plan: GeneratedTests }) {
+function Bullets({ items, empty }: { items: string[]; empty: string }) {
+  if (items.length === 0) return <p className="text-sm text-muted-foreground">{empty}</p>
   return (
-    <dl className="grid gap-3 rounded-lg border bg-card p-3 text-sm sm:grid-cols-2">
-      <div>
-        <dt className="label-caps mb-1">Interface</dt>
-        <dd className="font-mono text-[13px] wrap-break-word">{plan.interface}</dd>
-      </div>
-      <div>
-        <dt className="label-caps mb-1">How results are compared</dt>
-        <dd>{plan.comparison}</dd>
-      </div>
-    </dl>
+    <ul className="list-disc space-y-1 pl-5 text-sm">
+      {items.map((item, index) => (
+        <li key={index}>{item}</li>
+      ))}
+    </ul>
   )
 }
 
-export function ArtifactPanel({ run }: { run: Run }) {
+interface ArtifactPanelProps {
+  run: Run
+  tab: ArtifactTab
+  onTabChange: (tab: ArtifactTab) => void
+  verificationOpen: boolean
+  onVerificationOpenChange: (open: boolean) => void
+}
+
+export function ArtifactPanel({ run, tab, onTabChange, verificationOpen, onVerificationOpenChange }: ArtifactPanelProps) {
   const files = FILE_NAMES[run.language]
   const code = run.generated_code
   const plan = run.generated_tests
   const requirements = run.requirements
-  const languageBadge = (
-    <Badge variant="outline" className="h-5 rounded-md text-muted-foreground">
-      {LANGUAGE_LABELS[run.language]}
-    </Badge>
-  )
+  const language = LANGUAGE_LABELS[run.language]
 
   const coverage = plan
     ? Object.entries(
@@ -150,125 +228,118 @@ export function ArtifactPanel({ run }: { run: Run }) {
     : []
 
   return (
-    <Tabs defaultValue="solution" className="gap-3">
-      <TabsList className="w-full justify-start sm:w-fit" aria-label="Generated artifacts">
+    <Tabs value={tab} onValueChange={(value) => onTabChange(value as ArtifactTab)} className="gap-4">
+      <TabsList aria-label="Run results">
         <TabsTrigger value="solution">Solution</TabsTrigger>
         <TabsTrigger value="tests">Tests</TabsTrigger>
-        <TabsTrigger value="plan">Test plan</TabsTrigger>
-        <TabsTrigger value="requirements">Requirements</TabsTrigger>
+        <TabsTrigger value="details">Details</TabsTrigger>
       </TabsList>
 
-      {run.revision_count > 0 && (
-        <p className="flex items-center gap-2 text-xs text-muted-foreground">
-          <RefreshCw className="size-3.5" aria-hidden="true" />
-          Repaired {run.revision_count}× during verification. Showing the latest version; earlier
-          versions are not kept.
-        </p>
-      )}
-
-      <TabsContent value="solution" className="space-y-3">
+      <TabsContent value="solution" className={PANEL}>
         {code ? (
           <>
-            <CodeViewer code={code.solution_code} label={files.solution} meta={languageBadge} />
-            {code.explanation && (
-              <Section title="Approach">
-                <p className="text-sm leading-relaxed text-muted-foreground">{code.explanation}</p>
-              </Section>
+            {run.revision_count > 0 && (
+              <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <RefreshCw className="size-3.5" aria-hidden="true" />
+                Latest version, after {formatCount(run.revision_count, "repair")}.
+              </p>
             )}
+            <CodeViewer code={code.solution_code} label={files.solution} meta={<span className="text-xs text-muted-foreground">{language}</span>} />
+            {code.explanation && <Approach text={code.explanation} />}
           </>
         ) : (
-          <Pending run={run} stage="generating_code" what="solution" />
+          <Pending run={run} stages={["analyzing", "generating_tests", "generating_code"]} what="solution" />
         )}
       </TabsContent>
 
-      <TabsContent value="tests" className="space-y-4">
+      <TabsContent value="tests" className={PANEL}>
         {plan ? (
           <>
-            <PlanSummary plan={plan} />
-            <Section title={`Test cases (${plan.cases.length})`}>
-              <ul className="divide-y rounded-lg border">
-                {plan.cases.map((testCase, index) => (
-                  <TestCaseCard key={testCase.name} testCase={testCase} index={index} />
-                ))}
-              </ul>
-            </Section>
-          </>
-        ) : (
-          <Pending run={run} stage="generating_tests" what="test cases" />
-        )}
-        {code ? (
-          <Section title="Executable test program">
-            <CodeViewer code={code.test_code} label={files.tests} meta={languageBadge} />
-          </Section>
-        ) : (
-          plan && <Pending run={run} stage="generating_code" what="test program" />
-        )}
-      </TabsContent>
-
-      <TabsContent value="plan" className="space-y-4">
-        {plan ? (
-          <>
-            <PlanSummary plan={plan} />
-            <Section title="Coverage">
-              <ul className="flex flex-wrap gap-2">
+            <dl className="grid gap-4 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="font-semibold">Interface</dt>
+                <dd className="mt-1 font-mono text-[13px] wrap-break-word text-muted-foreground">{plan.interface}</dd>
+              </div>
+              <div>
+                <dt className="font-semibold">How results are compared</dt>
+                <dd className="mt-1 text-muted-foreground">{plan.comparison}</dd>
+              </div>
+            </dl>
+            <section className="space-y-2">
+              <Heading>Test cases ({plan.cases.length})</Heading>
+              <ul className="flex flex-wrap gap-1.5" aria-label="Coverage by category">
                 {coverage.map(([category, count]) => (
                   <li key={category}>
-                    <Badge variant="outline" className="rounded-md">
-                      {CATEGORY_LABELS[category as CaseCategory] ?? category}
-                      <span className="font-mono text-muted-foreground">{count}</span>
+                    <Badge variant="outline" className="rounded-md font-normal text-muted-foreground">
+                      {CATEGORY_LABELS[category as CaseCategory] ?? category} {count}
                     </Badge>
                   </li>
                 ))}
               </ul>
-            </Section>
-            <Section title="Cases">
-              <ol className="divide-y rounded-lg border text-sm">
+              <ul className="divide-y">
                 {plan.cases.map((testCase) => (
-                  <li key={testCase.name} className="grid gap-1 px-3 py-2 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)] sm:gap-3">
-                    <span className="font-mono text-[13px] break-all">{testCase.name}</span>
-                    <span className="text-muted-foreground">{testCase.description}</span>
-                  </li>
+                  <TestCaseRow key={testCase.name} testCase={testCase} />
                 ))}
-              </ol>
-            </Section>
+              </ul>
+            </section>
+            {code && (
+              <Disclosure summary={`Test program (${files.tests})`}>
+                <CodeViewer code={code.test_code} label={files.tests} />
+              </Disclosure>
+            )}
           </>
         ) : (
-          <Pending run={run} stage="generating_tests" what="test plan" />
+          <Pending run={run} stages={["analyzing", "generating_tests"]} what="tests" />
         )}
       </TabsContent>
 
-      <TabsContent value="requirements" className="space-y-5">
-        {requirements ? (
-          <>
-            <Section title="Problem">
-              <p className="text-sm leading-relaxed">{requirements.problem_summary}</p>
-            </Section>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Section title="Expected input">
-                <p className="text-sm">{requirements.expected_input}</p>
-              </Section>
-              <Section title="Expected output">
-                <p className="text-sm">{requirements.expected_output}</p>
-              </Section>
-            </div>
-            <Section title="Functional requirements">
-              <Bullets items={requirements.functional_requirements} empty="None stated." />
-            </Section>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Section title="Edge cases">
+      <TabsContent value="details" className={cn(PANEL, "space-y-0 divide-y")}>
+        <Disclosure
+          id="verification-details"
+          summary={<span className="font-semibold text-foreground">Verification details</span>}
+          open={verificationOpen}
+          onOpenChange={onVerificationOpenChange}
+          className="pb-3"
+        >
+          <VerificationDetails run={run} />
+        </Disclosure>
+        <Disclosure summary={<span className="font-semibold text-foreground">Requirements</span>} className="py-3">
+          {requirements ? (
+            <div className="space-y-4">
+              <p className="text-sm">{requirements.problem_summary}</p>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <section className="space-y-1">
+                  <Heading>Expected input</Heading>
+                  <p className="text-sm text-muted-foreground">{requirements.expected_input}</p>
+                </section>
+                <section className="space-y-1">
+                  <Heading>Expected output</Heading>
+                  <p className="text-sm text-muted-foreground">{requirements.expected_output}</p>
+                </section>
+              </div>
+              <section className="space-y-1">
+                <Heading>Functional requirements</Heading>
+                <Bullets items={requirements.functional_requirements} empty="None stated." />
+              </section>
+              <section className="space-y-1">
+                <Heading>Edge cases</Heading>
                 <Bullets items={requirements.edge_cases} empty="None identified." />
-              </Section>
-              <Section title="Constraints">
+              </section>
+              <section className="space-y-1">
+                <Heading>Constraints</Heading>
                 <Bullets items={requirements.constraints} empty="None stated." />
-              </Section>
+              </section>
+              <section className="space-y-1">
+                <Heading>{language} requirements</Heading>
+                <Bullets items={requirements.relevant_language_requirements} empty="None stated." />
+              </section>
             </div>
-            <Section title={`${LANGUAGE_LABELS[run.language]} requirements`}>
-              <Bullets items={requirements.relevant_language_requirements} empty="None stated." />
-            </Section>
-          </>
-        ) : (
-          <Pending run={run} stage="analyzing" what="requirements analysis" />
-        )}
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {run.status === "failed" ? "No requirements were produced." : "The requirements will appear here."}
+            </p>
+          )}
+        </Disclosure>
       </TabsContent>
     </Tabs>
   )

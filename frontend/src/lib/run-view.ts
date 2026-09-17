@@ -4,9 +4,8 @@
  */
 import type { ApiError } from "@/api/client"
 import { NETWORK_ERROR_DETAIL } from "@/api/client"
-import type { ApprovalStatus, ErrorCode, Run, RunStage } from "@/api/types"
-import { formatCount } from "@/lib/format"
-import { APPROVAL_STATUS_LABELS, describeError, type Tone } from "@/lib/labels"
+import type { ErrorCode, Run, RunStage } from "@/api/types"
+import { describeError, type Tone } from "@/lib/labels"
 
 // ---------------------------------------------------------------------------------------
 // Semantic state
@@ -58,17 +57,6 @@ export function pageState(data: Run | undefined, error: ApiError | null): PageSt
 /** Approve/Reject controls exist only while the server says it is waiting. */
 export function showApprovalControls(run: Run): boolean {
   return run.status === "waiting_for_approval"
-}
-
-/** True only when the server has accepted a verified solution (not merely a passing run). */
-export function isVerified(run: Run): boolean {
-  const phase = runPhase(run)
-  return (
-    phase === "awaiting_approval" ||
-    phase === "resuming" ||
-    phase === "completed" ||
-    run.approval_status === "approved"
-  )
 }
 
 // ---------------------------------------------------------------------------------------
@@ -132,110 +120,82 @@ export function isRetryingExecution(run: Run): boolean {
 }
 
 // ---------------------------------------------------------------------------------------
-// Timeline (derived from the current state only; there is no event history)
+// Progress (derived from the current state only; there is no event history)
 
-export type StepId = "analyze" | "test_plan" | "code" | "verify" | "approval" | "result"
-export type StepState = "pending" | "active" | "done" | "failed"
+export type ProgressStepId = "understand" | "build" | "verify" | "approve"
+/** "stopped" marks where a failed run ended; its tone says how serious that is. */
+export type ProgressState = "done" | "current" | "upcoming" | "stopped"
 
-export interface TimelineStep {
-  id: StepId
+export interface ProgressStep {
+  id: ProgressStepId
   label: string
-  state: StepState
-  detail: string | null
-  /** For a failed (stopped) step: how serious the stop is. A rejection is not an error. */
-  tone: Tone | null
+  state: ProgressState
 }
 
-const STEPS: readonly { id: StepId; label: string }[] = [
-  { id: "analyze", label: "Analyze" },
-  { id: "test_plan", label: "Test plan" },
-  { id: "code", label: "Code" },
-  { id: "verify", label: "Verify" },
-  { id: "approval", label: "Approval" },
-  { id: "result", label: "Result" },
-]
-const RESULT_INDEX = 5
+export interface Progress {
+  steps: ProgressStep[]
+  /** Tone of the stop, when the run failed inside a step. A rejection is neutral. */
+  stopTone: Tone | null
+}
 
-/** Index of the step a stage belongs to; -1 before any step, 6 once everything is done. */
-const STAGE_STEP: Record<RunStage, number> = {
+const PROGRESS_STEPS: readonly { id: ProgressStepId; label: string }[] = [
+  { id: "understand", label: "Understand" },
+  { id: "build", label: "Build" },
+  { id: "verify", label: "Verify" },
+  { id: "approve", label: "Approve" },
+]
+
+/** Step index per backend stage: -1 before any step, 4 once every step is done. */
+const STAGE_PROGRESS: Record<RunStage, number> = {
   queued: -1,
   analyzing: 0,
   generating_tests: 1,
-  generating_code: 2,
-  executing: 3,
-  reviewing: 3,
-  revising_code: 3,
-  revising_tests: 3,
-  waiting_for_approval: 4,
-  resuming: RESULT_INDEX,
-  completed: 6,
+  generating_code: 1,
+  executing: 2,
+  reviewing: 2,
+  revising_code: 2,
+  revising_tests: 2,
+  waiting_for_approval: 3,
+  resuming: 3,
+  completed: 4,
   // Never an error.stage in practice; a failed run is placed by its error instead.
   failed: -1,
 }
 
-/** What the Verify step is doing right now, in words. */
-export function verifyActivity(run: Run): string | null {
+export function progress(run: Run): Progress {
+  const failed = run.status === "failed"
+  const at = failed ? (run.error ? STAGE_PROGRESS[run.error.stage] : -1) : STAGE_PROGRESS[run.stage]
+  const steps = PROGRESS_STEPS.map(({ id, label }, index): ProgressStep => {
+    let state: ProgressState = "upcoming"
+    if (index < at) state = "done"
+    else if (index === at) state = failed ? "stopped" : "current"
+    return { id, label, state }
+  })
+  const stopped = failed && at >= 0 && at < PROGRESS_STEPS.length
+  return { steps, stopTone: stopped ? describeError(run.error).tone : null }
+}
+
+/**
+ * One sentence of context while AstraAi repeats verification, or null on a first attempt.
+ * Everything here comes from server counters and stage; nothing is inferred beyond them.
+ */
+export function workingNote(run: Run): string | null {
   const attempt = executionAttempt(run)
-  switch (evidenceStage(run)) {
-    case "executing":
-      return isRetryingExecution(run)
-        ? `Retrying attempt ${attempt} after a sandbox error`
-        : `Running attempt ${attempt}`
-    case "reviewing":
-      return `Reviewing attempt ${attempt}`
+  switch (run.stage) {
     case "revising_code":
-      return `Repairing solution · revision ${run.revision_count + 1}`
+      return `Found an issue — repairing the solution (attempt ${attempt + 1}).`
     case "revising_tests":
-      return `Repairing tests · revision ${run.revision_count + 1}`
+      return `Found an issue — repairing the tests (attempt ${attempt + 1}).`
+    case "executing":
+    case "reviewing":
+      if (attempt === 1) return null
+      if (isRetryingExecution(run)) return `Verification didn't run — trying again (attempt ${attempt}).`
+      return run.revision_count > 0
+        ? `Checking the repaired version (attempt ${attempt}).`
+        : `Verifying again (attempt ${attempt}).`
     default:
       return null
   }
-}
-
-/** Server counters in compact form, e.g. "Attempt 2 · 1 revision". */
-export function verifyCounters(run: Run): string {
-  const parts = [`Attempt ${executionAttempt(run)}`]
-  if (run.revision_count > 0) parts.push(formatCount(run.revision_count, "revision"))
-  if (run.execution_retry_count > 0) {
-    parts.push(formatCount(run.execution_retry_count, "retry", "retries"))
-  }
-  return parts.join(" · ")
-}
-
-function approvalDetail(status: ApprovalStatus | null): string | null {
-  return status === null ? null : APPROVAL_STATUS_LABELS[status]
-}
-
-export function timeline(run: Run): TimelineStep[] {
-  const failed = run.status === "failed"
-  // A failed run marks the step it stopped in (from error.stage); a run that failed before
-  // any step started (for example a shutdown while queued) marks only the result.
-  const current = failed
-    ? run.error
-      ? STAGE_STEP[run.error.stage]
-      : -1
-    : STAGE_STEP[run.stage]
-
-  return STEPS.map(({ id, label }, index) => {
-    let state: StepState = "pending"
-    if (index < current) state = "done"
-    else if (index === current) state = failed ? "failed" : "active"
-    if (failed && index === RESULT_INDEX) state = "failed"
-
-    let detail: string | null = null
-    if (id === "verify" && (state !== "pending" || run.execution_result !== null)) {
-      const activity = state === "active" ? verifyActivity(run) : null
-      detail = activity ?? verifyCounters(run)
-    } else if (id === "approval") {
-      detail = approvalDetail(run.approval_status)
-    } else if (id === "result" && run.status === "completed") {
-      detail = "Approved and complete"
-    } else if (id === "result" && failed) {
-      detail = describeError(run.error).title
-    }
-    const tone = state === "failed" ? describeError(run.error).tone : null
-    return { id, label, state, detail, tone }
-  })
 }
 
 // ---------------------------------------------------------------------------------------

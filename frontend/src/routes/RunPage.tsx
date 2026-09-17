@@ -1,91 +1,76 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { Check, Copy, Plus, WifiOff } from "lucide-react"
+import { ChevronDown, Plus, WifiOff } from "lucide-react"
 import { Link, useParams } from "react-router"
 
 import type { ApiError } from "@/api/client"
 import type { Run } from "@/api/types"
 import { Brand } from "@/components/Brand"
-import { ArtifactPanel } from "@/components/run/ArtifactPanel"
-import { CriticPanel } from "@/components/run/CriticPanel"
-import { ExecutionPanel } from "@/components/run/ExecutionPanel"
-import { RunStatusPanel } from "@/components/run/RunStatusPanel"
-import { RunTimeline } from "@/components/run/RunTimeline"
+import { ArtifactPanel, type ArtifactTab } from "@/components/run/ArtifactPanel"
+import { DecisionPanel } from "@/components/run/DecisionPanel"
+import { RunProgress } from "@/components/run/RunProgress"
 import { StatusBadge } from "@/components/run/StatusBadge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
+import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery"
 import { useRun } from "@/hooks/useRun"
-import { formatDateTime, shortId } from "@/lib/format"
-import { describeError, LANGUAGE_LABELS, STAGE_ACTIVITY, STAGE_LABELS, STATUS_LABELS } from "@/lib/labels"
+import { describeError, LANGUAGE_LABELS, STAGE_ACTIVITY, STATUS_LABELS } from "@/lib/labels"
 import { pageState, showApprovalControls } from "@/lib/run-view"
+import { cn } from "@/lib/utils"
 
-/** Status and stage in words; a stopped run is described by its outcome, not "Failed". */
-function describeProgress(run: Run): { status: string; stage: string } {
-  if (run.status === "failed") {
-    return {
-      status: describeError(run.error).title,
-      stage: run.error ? `Stopped during ${STAGE_LABELS[run.error.stage].toLowerCase()}` : "Stopped",
-    }
-  }
-  return { status: STATUS_LABELS[run.status], stage: STAGE_ACTIVITY[run.stage] }
-}
-
-function CopyRunId({ runId }: { runId: string }) {
-  const [copied, setCopied] = useState(false)
-  useEffect(() => {
-    if (!copied) return
-    const timer = window.setTimeout(() => setCopied(false), 1500)
-    return () => window.clearTimeout(timer)
-  }, [copied])
-  return (
-    <Button
-      variant="ghost"
-      size="xs"
-      className="font-mono text-muted-foreground"
-      aria-label={copied ? "Run ID copied" : `Copy run ID ${runId}`}
-      onClick={() =>
-        navigator.clipboard.writeText(runId).then(
-          () => setCopied(true),
-          () => undefined,
-        )
-      }
-    >
-      {shortId(runId)}
-      {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-    </Button>
-  )
+/** One short sentence for the page title and the polite live region. */
+function announcement(run: Run): string {
+  if (run.status === "failed") return describeError(run.error).title
+  if (run.status === "running") return STAGE_ACTIVITY[run.stage]
+  return STATUS_LABELS[run.status]
 }
 
 function TopBar({ run }: { run?: Run }) {
+  const [taskOpen, setTaskOpen] = useState(false)
+
+  const taskToggle = run && (
+    <button
+      type="button"
+      onClick={() => setTaskOpen((open) => !open)}
+      aria-expanded={taskOpen}
+      aria-controls="full-task"
+      className="flex min-w-0 items-center gap-1 rounded-sm text-left text-sm text-muted-foreground hover:text-foreground"
+    >
+      <span className="truncate">{run.task}</span>
+      <ChevronDown
+        className={cn("size-4 shrink-0 transition-transform duration-150", taskOpen && "rotate-180")}
+        aria-hidden="true"
+      />
+      <span className="sr-only">{taskOpen ? "Hide the full task" : "Show the full task"}</span>
+    </button>
+  )
+
   return (
-    <header className="sticky top-0 z-20 border-b bg-background/90 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-3 px-4 sm:px-6">
-        <Brand />
-        {run && (
-          <>
-            <span className="hidden h-5 w-px bg-border sm:block" aria-hidden="true" />
-            <p className="hidden min-w-0 flex-1 truncate text-sm text-muted-foreground sm:block" title={run.task}>
-              {run.task}
-            </p>
-            <div className="ml-auto flex shrink-0 items-center gap-2 sm:ml-0">
-              <StatusBadge run={run} />
-              <Badge variant="outline" className="hidden h-6 rounded-md text-muted-foreground md:inline-flex">
-                {LANGUAGE_LABELS[run.language]}
-              </Badge>
-              <span className="hidden lg:inline-flex">
-                <CopyRunId runId={run.run_id} />
-              </span>
-            </div>
-          </>
-        )}
-        <Button asChild variant="outline" size="sm" className={run ? "hidden md:inline-flex" : "ml-auto"}>
-          <Link to="/">
-            <Plus aria-hidden="true" />
-            New run
-          </Link>
-        </Button>
+    <header className="sticky top-0 z-20 border-b bg-background/95 backdrop-blur">
+      {/* One task toggle: its own row on phones, inline between brand and status otherwise. */}
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-4 px-4 sm:h-14 sm:flex-nowrap sm:px-6">
+        <div className="flex h-14 items-center sm:h-auto">
+          <Brand />
+        </div>
+        {run && <div className="order-last flex min-w-0 basis-full pb-2.5 sm:order-none sm:flex-1 sm:basis-auto sm:pb-0">{taskToggle}</div>}
+        <div className="ml-auto flex shrink-0 items-center gap-2 sm:ml-0">
+          {run && <StatusBadge run={run} />}
+          <Button asChild variant="ghost" size="sm" aria-label="New run">
+            <Link to="/">
+              <Plus aria-hidden="true" />
+              <span className="hidden md:inline">New run</span>
+            </Link>
+          </Button>
+        </div>
       </div>
+      {run && taskOpen && (
+        <div id="full-task" className="border-t">
+          <div className="mx-auto max-w-6xl px-4 py-3 sm:px-6">
+            <p className="max-h-60 overflow-auto text-sm leading-relaxed whitespace-pre-wrap">{run.task}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{LANGUAGE_LABELS[run.language]}</p>
+          </div>
+        </div>
+      )}
     </header>
   )
 }
@@ -102,83 +87,60 @@ function CenteredMessage({ title, children }: { title: string; children: ReactNo
   )
 }
 
-function ConnectionBanner({ error }: { error: ApiError }) {
-  return (
-    <Alert className="mb-4">
-      <WifiOff aria-hidden="true" />
-      <AlertTitle>Reconnecting</AlertTitle>
-      <AlertDescription>
-        {error.detail} Showing the last known state; it may be out of date.
-      </AlertDescription>
-    </Alert>
-  )
-}
-
 function Workspace({ run, connectionError }: { run: Run; connectionError: ApiError | null }) {
-  const waiting = showApprovalControls(run)
+  const isDesktop = useMediaQuery(DESKTOP_QUERY)
+  const [tab, setTab] = useState<ArtifactTab>("solution")
+  const [verificationOpen, setVerificationOpen] = useState(false)
+  const [scrollToVerification, setScrollToVerification] = useState(0)
+
+  useEffect(() => {
+    if (scrollToVerification === 0) return
+    document.getElementById("verification-details")?.scrollIntoView({ block: "start", behavior: "smooth" })
+  }, [scrollToVerification])
+
+  function showDetails() {
+    setTab("details")
+    setVerificationOpen(true)
+    setScrollToVerification((count) => count + 1)
+  }
+
+  // Below the desktop breakpoint the approval actions sit in a fixed bar; keep content clear of it.
+  const reserveActionBar = showApprovalControls(run) && !isDesktop
+
   return (
-    <main
-      className={
-        "mx-auto grid max-w-[1600px] grid-cols-[minmax(0,1fr)] items-start gap-4 px-4 py-4 sm:px-6 " +
-        "[grid-template-areas:'banner'_'timeline'_'status'_'artifacts'_'evidence'] " +
-        "lg:grid-cols-[minmax(0,1fr)_340px] lg:[grid-template-areas:'banner_banner'_'timeline_timeline'_'artifacts_status'_'artifacts_evidence'] " +
-        "xl:grid-cols-[220px_minmax(0,1fr)_380px] xl:[grid-template-areas:'banner_banner_banner'_'timeline_artifacts_status'_'timeline_artifacts_evidence'] " +
-        "lg:grid-rows-[auto_auto_auto_1fr] xl:grid-rows-[auto_auto_1fr] " +
-        (waiting ? "pb-40 md:pb-4" : "")
-      }
-    >
-      <div className="[grid-area:banner] empty:hidden">
-        {connectionError && <ConnectionBanner error={connectionError} />}
+    <div className="mx-auto max-w-6xl px-4 sm:px-6">
+      <h1 className="sr-only">AstraAi run: {run.task}</h1>
+      <div className="border-b py-3">
+        <RunProgress run={run} />
       </div>
-
-      <div className="min-w-0 [grid-area:timeline] rounded-lg border bg-card p-2 xl:sticky xl:top-18 xl:border-0 xl:bg-transparent xl:p-0">
-        <RunTimeline run={run} />
+      {connectionError && (
+        <Alert className="mt-4">
+          <WifiOff aria-hidden="true" />
+          <AlertTitle>Reconnecting</AlertTitle>
+          <AlertDescription>{connectionError.detail} Showing the last known state.</AlertDescription>
+        </Alert>
+      )}
+      <div
+        className={cn(
+          "grid gap-6 py-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start lg:gap-8",
+          reserveActionBar && "pb-40",
+        )}
+      >
+        {/* Content first in the document: on narrow screens the solution comes before the decision. */}
+        <main className="min-w-0">
+          <ArtifactPanel
+            run={run}
+            tab={tab}
+            onTabChange={setTab}
+            verificationOpen={verificationOpen}
+            onVerificationOpenChange={setVerificationOpen}
+          />
+        </main>
+        <aside aria-label="Run status" className="lg:sticky lg:top-20">
+          <DecisionPanel run={run} onShowDetails={showDetails} />
+        </aside>
       </div>
-
-      <section aria-labelledby="task-heading" className="min-w-0 space-y-4 [grid-area:artifacts]">
-        <div className="rounded-lg border bg-card p-4">
-          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-            <h1 id="task-heading" className="label-caps">
-              Task
-            </h1>
-            <span className="text-xs text-muted-foreground">
-              {LANGUAGE_LABELS[run.language]} · started {formatDateTime(run.created_at)}
-            </span>
-          </div>
-          <p className="max-h-40 overflow-auto text-sm leading-relaxed whitespace-pre-wrap">
-            {run.task}
-          </p>
-          <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-1 border-t pt-3 text-xs">
-            <div className="flex gap-1.5">
-              <dt className="text-muted-foreground">Status</dt>
-              <dd>{describeProgress(run).status}</dd>
-            </div>
-            <div className="flex gap-1.5">
-              <dt className="text-muted-foreground">Stage</dt>
-              <dd>{describeProgress(run).stage}</dd>
-            </div>
-            <div className="flex gap-1.5">
-              <dt className="text-muted-foreground">Revisions</dt>
-              <dd>{run.revision_count}</dd>
-            </div>
-            <div className="flex gap-1.5">
-              <dt className="text-muted-foreground">Execution retries</dt>
-              <dd>{run.execution_retry_count}</dd>
-            </div>
-          </dl>
-        </div>
-        <ArtifactPanel run={run} />
-      </section>
-
-      <div className="min-w-0 [grid-area:status]">
-        <RunStatusPanel run={run} />
-      </div>
-
-      <div className="min-w-0 space-y-4 [grid-area:evidence]">
-        <ExecutionPanel run={run} />
-        <CriticPanel run={run} />
-      </div>
-    </main>
+    </div>
   )
 }
 
@@ -189,24 +151,23 @@ export function RunPage() {
   const run = state.kind === "run" ? state.run : undefined
 
   useEffect(() => {
-    document.title = run ? `${describeProgress(run).status} · ${shortId(run.run_id)} · AstraAi` : "AstraAi"
+    document.title = run ? `${announcement(run)} · AstraAi` : "AstraAi"
   }, [run])
 
   return (
     <div className="min-h-dvh">
       <TopBar run={run} />
-      {/* One polite announcement per status/stage change, not per poll. */}
+      {/* One polite announcement per state change, not per poll. */}
       <p className="sr-only" aria-live="polite">
-        {run ? `${describeProgress(run).status}: ${describeProgress(run).stage}` : ""}
+        {run ? announcement(run) : ""}
       </p>
 
       {state.kind === "loading" && (
-        <main className="mx-auto grid max-w-[1600px] gap-4 px-4 py-4 sm:px-6 xl:grid-cols-[220px_minmax(0,1fr)_380px]" aria-busy="true">
-          <Skeleton className="h-64" />
-          <Skeleton className="h-96" />
-          <Skeleton className="h-64" />
+        <div className="mx-auto grid max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[minmax(0,1fr)_340px]" aria-busy="true">
+          <Skeleton className="h-80" />
+          <Skeleton className="h-48" />
           <span className="sr-only">Loading run…</span>
-        </main>
+        </div>
       )}
       {state.kind === "not_found" && (
         <CenteredMessage title="Run not found">

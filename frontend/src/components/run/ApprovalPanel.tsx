@@ -1,8 +1,9 @@
 import { useCallback, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { Check, Loader2, ShieldCheck, X } from "lucide-react"
+import { Check, Loader2, ShieldCheck } from "lucide-react"
 
 import type { ApprovalDecision, Run } from "@/api/types"
+import { Disclosure } from "@/components/Disclosure"
 import { ApprovalCountdown } from "@/components/run/ApprovalCountdown"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
@@ -17,18 +18,26 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
 import { useApproval } from "@/hooks/useApproval"
+import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery"
 import { boostRunPolling, runQueryKey } from "@/hooks/useRun"
-import { formatCount, formatDateTime, formatTestCounts } from "@/lib/format"
-import { EXECUTION_STATUS, LANGUAGE_LABELS } from "@/lib/labels"
+import { formatCount, formatTestResult } from "@/lib/format"
+import { EXECUTION_STATUS, VERDICTS } from "@/lib/labels"
 import { describeApprovalError } from "@/lib/run-view"
 
+interface ApprovalPanelProps {
+  run: Run
+  onShowDetails: () => void
+}
+
 /**
- * Shown only while the server says the run is waiting. Decisions are never applied
- * locally: the panel is replaced when a refetch shows the server moved on.
+ * The decision, shown only while the server says the run is waiting. Nothing is applied
+ * locally: the panel is replaced when a refetch shows the server moved on. Actions and the
+ * countdown exist once: in this panel on desktop, in a sticky bar on smaller screens.
  */
-export function ApprovalPanel({ run }: { run: Run }) {
+export function ApprovalPanel({ run, onShowDetails }: ApprovalPanelProps) {
   const queryClient = useQueryClient()
   const approval = useApproval(run.run_id)
+  const isDesktop = useMediaQuery(DESKTOP_QUERY)
   const [confirmReject, setConfirmReject] = useState(false)
   const [expiryReached, setExpiryReached] = useState(false)
 
@@ -39,170 +48,150 @@ export function ApprovalPanel({ run }: { run: Run }) {
     void queryClient.invalidateQueries({ queryKey: runQueryKey(run.run_id) })
   }, [queryClient, run.run_id])
 
-  const submitting = approval.isPending
-  const locked = submitting || approval.isSuccess || expiryReached
+  const locked = approval.isPending || approval.isSuccess || expiryReached
   const request = run.approval_request
-  const counts = request ? formatTestCounts(request.tests_passed, request.tests_failed) : null
-  const expiresAt = run.approval_expires_at
+  const tests = request
+    ? (formatTestResult(request.tests_passed, request.tests_failed) ??
+      EXECUTION_STATUS[request.execution_status].label)
+    : null
+  const review = run.critic_result ? VERDICTS[run.critic_result.verdict].label : null
+  const repairs = [
+    run.revision_count > 0 ? formatCount(run.revision_count, "repair") : null,
+    run.execution_retry_count > 0 ? formatCount(run.execution_retry_count, "retry", "retries") : null,
+  ].filter(Boolean)
+  const approving = approval.isPending && approval.variables === "approve"
 
   function decide(decision: ApprovalDecision) {
     if (locked) return
     approval.mutate(decision)
   }
 
-  function actions(compact: boolean) {
-    return (
-      <div className="flex gap-2">
-        <Button
-          variant="ghost"
-          size={compact ? "lg" : "default"}
-          onClick={() => setConfirmReject(true)}
-          disabled={locked}
-          aria-label="Reject this solution"
-          className="flex-1 border border-border text-muted-foreground sm:flex-none"
-        >
-          <X aria-hidden="true" />
-          Reject
-        </Button>
-        <Button
-          size={compact ? "lg" : "default"}
-          onClick={() => decide("approve")}
-          disabled={locked}
-          aria-label="Approve this solution"
-          className="flex-2 sm:flex-none sm:px-4"
-        >
-          {submitting && approval.variables === "approve" ? (
-            <Loader2 className="animate-spin" aria-hidden="true" />
-          ) : (
-            <Check aria-hidden="true" />
-          )}
-          {submitting && approval.variables === "approve" ? "Approving…" : "Approve"}
-        </Button>
-      </div>
-    )
-  }
+  const countdown = run.approval_expires_at && (
+    <ApprovalCountdown
+      requestedAt={run.approval_requested_at}
+      expiresAt={run.approval_expires_at}
+      onReached={handleExpiryReached}
+    />
+  )
+
+  const actions = (
+    <div className="flex gap-2">
+      <Button
+        size="lg"
+        onClick={() => decide("approve")}
+        disabled={locked}
+        aria-label="Approve this solution"
+        className="flex-2"
+      >
+        {approving ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Check aria-hidden="true" />}
+        {approving ? "Approving…" : "Approve"}
+      </Button>
+      <Button
+        size="lg"
+        variant="outline"
+        onClick={() => setConfirmReject(true)}
+        disabled={locked}
+        aria-label="Reject this solution"
+        className="flex-1"
+      >
+        Reject
+      </Button>
+    </div>
+  )
 
   return (
-    <section
-      aria-labelledby="approval-heading"
-      className="rounded-lg border border-brand/30 bg-card shadow-[0_0_0_1px_oklch(0.8_0.09_205/0.06)]"
-    >
-      <header className="flex items-start gap-3 border-b border-brand/20 bg-brand/4 px-4 py-3">
-        <ShieldCheck className="mt-0.5 size-5 shrink-0 text-brand" aria-hidden="true" />
-        <div className="min-w-0 flex-1">
-          <p className="label-caps text-brand">Verified by AstraAi</p>
-          <h2 id="approval-heading" className="mt-1 font-semibold">
-            Waiting for your approval
-          </h2>
-        </div>
-        {expiresAt && (
-          <div className="shrink-0 pt-0.5">
-            <ApprovalCountdown
-              requestedAt={run.approval_requested_at}
-              expiresAt={expiresAt}
-              onReached={handleExpiryReached}
-            />
-          </div>
-        )}
-      </header>
-
-      <div className="space-y-4 p-4">
-        <p className="text-sm text-muted-foreground">
-          AstraAi generated tests and a solution, ran them in the sandbox, and its review accepted
-          the result. Nothing is accepted until you approve.
+    <section aria-labelledby="approval-heading" className="space-y-4">
+      <div>
+        <p className="flex items-center gap-1.5 text-sm font-medium text-success">
+          <ShieldCheck className="size-4" aria-hidden="true" />
+          Verified by AstraAi
         </p>
-
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
-          {request && (
-            <>
-              <dt className="text-muted-foreground">Problem</dt>
-              <dd>{request.problem_summary}</dd>
-            </>
-          )}
-          <dt className="text-muted-foreground">Language</dt>
-          <dd>{LANGUAGE_LABELS[run.language]}</dd>
-          {request && (
-            <>
-              <dt className="text-muted-foreground">Tests</dt>
-              <dd>
-                {EXECUTION_STATUS[request.execution_status].label}
-                {counts && <span className="text-muted-foreground"> · {counts}</span>}
-              </dd>
-            </>
-          )}
-          <dt className="text-muted-foreground">Repairs</dt>
-          <dd>
-            {formatCount(run.revision_count, "revision")} ·{" "}
-            {formatCount(run.execution_retry_count, "retry", "retries")}
-          </dd>
-          {expiresAt && (
-            <>
-              <dt className="text-muted-foreground">Expires</dt>
-              <dd>
-                <time dateTime={expiresAt}>{formatDateTime(expiresAt)}</time>
-              </dd>
-            </>
-          )}
-        </dl>
-
-        {request?.critic_reason && (
-          <section className="rounded-md bg-muted/50 px-3 py-2">
-            <h3 className="label-caps mb-1">Review</h3>
-            <p className="text-sm leading-relaxed">{request.critic_reason}</p>
-          </section>
-        )}
-        {request?.approval_means && (
-          <p className="text-xs text-muted-foreground">{request.approval_means}</p>
-        )}
-
-        {approval.error && !approval.isPending && (
-          <Alert variant="destructive">
-            <AlertDescription>{describeApprovalError(approval.error)}</AlertDescription>
-          </Alert>
-        )}
-        {approval.isSuccess && (
-          <p className="text-sm text-muted-foreground" role="status">
-            Decision sent. Waiting for the server to update the run…
-          </p>
-        )}
-        {expiryReached && !approval.isSuccess && (
-          <p className="text-sm text-muted-foreground" role="status">
-            The approval window has reached its end on this device. Checking with the server
-            whether the run has expired…
-          </p>
-        )}
-
-        {/* Inline actions on larger screens; a sticky bar keeps them in reach on phones. */}
-        <div className="hidden justify-end md:flex">{actions(false)}</div>
+        <h2 id="approval-heading" className="mt-1 text-lg font-semibold">
+          Ready for your approval
+        </h2>
       </div>
 
-      <div
-        role="region"
-        aria-label="Approval actions"
-        className="fixed inset-x-0 bottom-0 z-30 space-y-2 border-t bg-background/95 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur md:hidden"
-      >
-        <div className="flex items-center justify-between gap-3 text-xs">
-          <span className="font-medium text-brand">Verified · waiting for your approval</span>
-          {expiresAt && (
-            <ApprovalCountdown requestedAt={run.approval_requested_at} expiresAt={expiresAt} compact />
-          )}
+      <ul className="space-y-1 text-sm">
+        {tests && (
+          <li className="flex items-center gap-2">
+            <Check className="size-4 text-success" aria-hidden="true" />
+            {tests}
+          </li>
+        )}
+        {review && (
+          <li className="flex items-center gap-2">
+            <Check className="size-4 text-success" aria-hidden="true" />
+            {review}
+          </li>
+        )}
+        {repairs.length > 0 && <li className="pl-6 text-muted-foreground">After {repairs.join(" and ")}</li>}
+      </ul>
+
+      {isDesktop && (
+        <div className="space-y-2">
+          {actions}
+          {countdown && <p className="text-center">{countdown}</p>}
         </div>
-        {actions(true)}
+      )}
+
+      {approval.error && !approval.isPending && (
+        <Alert variant="destructive">
+          <AlertDescription>{describeApprovalError(approval.error)}</AlertDescription>
+        </Alert>
+      )}
+      {approval.isSuccess && (
+        <p className="text-sm text-muted-foreground" role="status">
+          Decision sent. Updating…
+        </p>
+      )}
+      {expiryReached && !approval.isSuccess && (
+        <p className="text-sm text-muted-foreground" role="status">
+          Checking with the server whether the approval window has closed…
+        </p>
+      )}
+
+      <div className="space-y-1 border-t pt-3">
+        {request?.critic_reason && (
+          <Disclosure summary="Why this was accepted">
+            <p className="text-sm leading-relaxed">{request.critic_reason}</p>
+            {request.approval_means && (
+              <p className="mt-2 text-sm text-muted-foreground">{request.approval_means}</p>
+            )}
+          </Disclosure>
+        )}
+        <button
+          type="button"
+          onClick={onShowDetails}
+          className="rounded-sm py-1 text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          Verification details
+        </button>
       </div>
+
+      {!isDesktop && (
+        <div
+          role="region"
+          aria-label="Approval actions"
+          className="fixed inset-x-0 bottom-0 z-30 space-y-2 border-t bg-background/95 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium">Ready for your approval</span>
+            {countdown}
+          </div>
+          {actions}
+        </div>
+      )}
 
       <AlertDialog open={confirmReject} onOpenChange={setConfirmReject}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Reject this solution?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Rejecting ends the run. The solution won't be accepted and can't be approved later.
-              The generated code and results stay visible.
-            </AlertDialogDescription>
+            <AlertDialogDescription>This will end the run and cannot be undone.</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Keep reviewing</AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction variant="destructive" onClick={() => decide("reject")}>
-              Reject solution
+              Reject
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
