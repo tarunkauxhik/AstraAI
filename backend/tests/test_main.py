@@ -49,7 +49,7 @@ def running(run: dict[str, Any]) -> bool:
 
 
 def finished(run: dict[str, Any]) -> bool:
-    return run["status"] in ("completed", "failed")
+    return run["status"] in ("completed", "failed", "expired")
 
 
 def waiting(run: dict[str, Any]) -> bool:
@@ -352,10 +352,55 @@ def test_an_expired_approval_is_409_and_shows_as_expired(api: Api) -> None:
     for response in responses:
         assert response.status_code == 409
         assert response.json() == {"detail": "The approval request has expired."}
-    assert (run["status"], run["stage"]) == ("failed", "failed")
+    # Expiry is not a failure: the verified solution and its evidence are still there.
+    assert (run["status"], run["stage"], run["error"]) == ("expired", "expired", None)
     assert (run["approval_status"], run["approval_required"]) == ("expired", False)
-    assert run["error"]["code"] == "approval_expired"
     assert run["approval_expires_at"] is not None
+    assert run["execution_result"]["status"] == "passed"
+    assert run["generated_code"] is not None
+
+
+def test_more_time_restarts_the_approval_window(api: Api) -> None:
+    clock = Clock()
+    with api(clock=clock) as client:
+        run_id = paused_run(client)
+        before = client.get(f"/runs/{run_id}").json()
+        clock.advance(300)
+        response = client.post(f"/runs/{run_id}/approval/extend")
+        after = client.get(f"/runs/{run_id}").json()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": run_id,
+        "approval_expires_at": after["approval_expires_at"],
+    }
+    assert after["approval_expires_at"] > before["approval_expires_at"]
+    assert after["approval_requested_at"] == before["approval_requested_at"]
+    assert after["status"] == "waiting_for_approval"
+
+
+def test_more_time_is_409_once_expired_or_decided_and_404_when_unknown(
+    api: Api,
+) -> None:
+    clock = Clock()
+    with api(clock=clock) as client:
+        expiring = paused_run(client)
+        decided = paused_run(client)
+        client.post(f"/runs/{decided}/approval", json={"decision": "reject"})
+        clock.advance(600)
+        expired = client.post(f"/runs/{expiring}/approval/extend")
+        not_waiting = client.post(f"/runs/{decided}/approval/extend")
+        unknown = client.post("/runs/no-such-run/approval/extend")
+
+    assert (expired.status_code, expired.json()) == (
+        409,
+        {"detail": "The approval request has expired."},
+    )
+    assert (not_waiting.status_code, not_waiting.json()) == (
+        409,
+        {"detail": "The run is not waiting for approval."},
+    )
+    assert unknown.status_code == 404
 
 
 def test_a_rejected_run_cannot_be_decided_again(api: Api) -> None:

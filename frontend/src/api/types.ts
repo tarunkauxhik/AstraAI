@@ -14,6 +14,8 @@ export type RunStatus =
   | "waiting_for_approval"
   | "completed"
   | "failed"
+  /** Nobody decided in time. Not a failure: the verified solution and evidence stay. */
+  | "expired"
 
 export type RunStage =
   | "queued"
@@ -28,6 +30,7 @@ export type RunStage =
   | "resuming"
   | "completed"
   | "failed"
+  | "expired"
 
 export type ExecutionStatus =
   | "passed"
@@ -75,7 +78,6 @@ export const KNOWN_ERROR_CODES = [
   "revision_budget_exhausted",
   "retry_budget_exhausted",
   "approval_rejected",
-  "approval_expired",
 ] as const
 
 export type KnownErrorCode = (typeof KNOWN_ERROR_CODES)[number]
@@ -203,6 +205,12 @@ export interface RunRequest {
 export interface RunAccepted {
   run_id: string
   status: RunStatus
+}
+
+/** Response of POST /runs/{id}/approval/extend: a fresh window counted from now. */
+export interface ApprovalExtended {
+  run_id: string
+  approval_expires_at: string
 }
 
 export interface HealthResponse {

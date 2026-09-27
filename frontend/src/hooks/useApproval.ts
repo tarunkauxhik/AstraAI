@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 
 import { api, type ApiError } from "@/api/client"
-import type { ApprovalDecision, RunAccepted } from "@/api/types"
+import type { ApprovalDecision, ApprovalExtended, RunAccepted } from "@/api/types"
 import { boostRunPolling, runQueryKey } from "@/hooks/useRun"
 
 /**
@@ -16,5 +16,14 @@ export function useApproval(runId: string) {
       boostRunPolling(runId)
       return queryClient.invalidateQueries({ queryKey: runQueryKey(runId) })
     },
+  })
+}
+
+/** Ask for a fresh review window. The new deadline arrives with the refetched run. */
+export function useExtendApproval(runId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<ApprovalExtended, ApiError, void>({
+    mutationFn: () => api.extendApproval(runId),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: runQueryKey(runId) }),
   })
 }

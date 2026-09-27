@@ -19,7 +19,7 @@ compose.yaml             local Docker setup
 backend/
   Dockerfile
   app/
-    main.py              FastAPI app: GET /health, POST /runs, GET /runs/{run_id}
+    main.py              FastAPI app: /health, /runs, /runs/{run_id}, approval and more time
     runs.py              RunManager: run records, bounded queue, in-process workers
     config.py            settings from environment variables / .env
     llm.py               structured-output client for the OpenAI-compatible endpoint
@@ -61,7 +61,7 @@ Fill in `backend/.env`:
 | `LLM_MAX_ATTEMPTS`    | Optional. Total attempts per LLM call, 1-5 (2)           |
 | `LLM_RETRY_BACKOFF_SECONDS` | Optional. Backoff × attempt number between tries; a 429's Retry-After up to 30s wins (1) |
 | `LLM_MAX_CONCURRENCY` | Optional. LLM requests in flight at once per process, 1-8 (2) |
-| `APPROVAL_TIMEOUT_SECONDS` | Optional. Seconds a verified solution waits for a human decision before the run expires, 5-86400 (600) |
+| `APPROVAL_TIMEOUT_SECONDS` | Optional. Seconds a verified solution waits for a human decision (restartable with more time) before the run expires, 5-86400 (600) |
 
 Run lifecycle and sandbox limits are listed, with defaults, in `backend/.env.example`.
 
@@ -112,10 +112,12 @@ Supported languages: `python`, `cpp`.
 | `POST /runs/{run_id}/approval` | 409 | Not waiting for approval: already decided, finished, or expired |
 | `POST /runs/{run_id}/approval` | 422 | Anything other than exactly `approve` or `reject` |
 | `POST /runs/{run_id}/approval` | 429 / 503 | Queue full / shutting down |
+| `POST /runs/{run_id}/approval/extend` | 200 | More time: `{"run_id", "approval_expires_at"}`, a fresh window counted from now |
+| `POST /runs/{run_id}/approval/extend` | 404 / 409 / 503 | Unknown run / not waiting or already expired / shutting down |
 
-A run has `status` (`queued`, `running`, `waiting_for_approval`, `completed`, `failed`) and a `stage` that moves in
+A run has `status` (`queued`, `running`, `waiting_for_approval`, `completed`, `failed`, `expired`) and a `stage` that moves in
 this order: `queued` → `analyzing` → `generating_tests` → `generating_code` → `executing` →
-`reviewing` → `waiting_for_approval` → `resuming` → `completed`, or `failed` from any step. A repair adds `revising_code` or
+`reviewing` → `waiting_for_approval` → `resuming` → `completed` (or `expired`), or `failed` from any step. A repair adds `revising_code` or
 `revising_tests` followed by `executing` and `reviewing` again. `requirements`, `generated_tests`, `generated_code`
 `execution_result` and `critic_result` fill in as each step finishes and are kept if a later step fails.
 A failed run carries a safe `error` of `{code, message, stage}`, never internal details.
@@ -127,9 +129,11 @@ paused graph is checkpointed in memory under the run id and frees the worker for
 Approving sets `approval_status: approved` and stage `resuming`, then continues the same
 LangGraph thread without repeating any LLM call or execution. Rejecting fails the run at once
 with `approval_rejected`. With no decision within `APPROVAL_TIMEOUT_SECONDS`, counted from
-when approval was requested, the run fails with `approval_expired` (`approval_status:
-expired`); a background sweep checks once a minute, and a late decision gets 409 either way.
-Checkpoints are deleted as soon as a run ends.
+when approval was requested, the run ends as `expired` (`approval_status: expired`, no
+`error`): the solution passed every check, so it is not a failure, and its code, tests and
+evidence stay on the run. A background sweep checks once a minute, and a late decision gets
+409 either way. `POST /runs/{run_id}/approval/extend` restarts the window from now, as often
+as the reviewer needs. Checkpoints are deleted as soon as a run ends.
 
 Otherwise it is `failed`
 with `error.code` `needs_human_review`, `revision_budget_exhausted` or `sandbox_unavailable`,
@@ -187,7 +191,7 @@ After each execution the critic's reconciled `recommended_action` decides what h
 
 | Action | Next step | Budget |
 | ------ | --------- | ------ |
-| `accept` | `human_approval`, then completed or failed | approval timeout |
+| `accept` | `human_approval`, then completed, failed (rejected) or expired | approval timeout, extendable |
 | `needs_human_review` | end, needs review | - |
 | `revise_code` | `revise_code` rewrites **only** the solution, then re-executes | 2 revisions per run, shared with tests |
 | `revise_tests` | `revise_tests` rewrites **only** the test code, then re-executes | same budget |

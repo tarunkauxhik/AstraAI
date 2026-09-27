@@ -17,27 +17,22 @@ export function formatDuration(ms: number): string {
   return `${minutes}m ${String(Math.floor(seconds % 60)).padStart(2, "0")}s`
 }
 
-/**
- * Test counts exactly as reported. The sandbox only prints a total when every case
- * passes, so a total is never invented from partial numbers.
- */
-export function formatTestCounts(
-  passed: number | null,
-  failed: number | null,
-): string | null {
-  if (passed !== null && failed !== null) return `${passed} passed · ${failed} failed`
-  if (passed !== null) return `${passed} passed`
-  if (failed !== null) return `${failed} failing`
-  return null
+/** A running clock: "0:07", "1:12", "1:02:03". */
+export function formatClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = String(total % 60).padStart(2, "0")
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`
 }
 
-/**
- * The headline test result: "8 / 8 tests passed" when every reported case passed, otherwise
- * the counts as reported. Null when the sandbox reported no counts.
- */
-export function formatTestResult(passed: number | null, failed: number | null): string | null {
-  if (passed !== null && failed === 0) return `${passed} / ${passed} tests passed`
-  return formatTestCounts(passed, failed)
+/** A finished span: "42s", "1m 42s", "1h 03m". */
+export function formatSpan(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000))
+  if (total < 60) return `${total}s`
+  const minutes = Math.floor(total / 60)
+  if (minutes < 60) return `${minutes}m ${String(total % 60).padStart(2, "0")}s`
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`
 }
 
 /** "1 revision", "0 retries". Counts only: the frontend never claims a server-side limit. */

@@ -245,14 +245,13 @@ export const rejectedRun = run({
   },
 })
 
+/** Nobody decided in time: not a failure, so no error, and every piece of evidence stays. */
 export const expiredRun = run({
-  ...rejectedRun,
+  ...waitingRun,
+  status: "expired",
+  stage: "expired",
   approval_status: "expired",
-  error: {
-    code: "approval_expired",
-    message: "Nobody approved or rejected the verified solution in time.",
-    stage: "waiting_for_approval",
-  },
+  approval_required: false,
 })
 
 export const llmFailedRun = run({
@@ -281,6 +280,22 @@ export const needsReviewRun = run({
   error: {
     code: "needs_human_review",
     message: "The agent could not confirm a correct solution, so the result needs human review.",
+    stage: "reviewing",
+  },
+})
+
+/** Out of fixes with a failing test: the evidence is the latest attempt's. */
+export const outOfFixesRun = run({
+  ...executingRun,
+  status: "failed",
+  stage: "failed",
+  generated_tests: GENERATED_TESTS,
+  execution_result: FAILED,
+  critic_result: CODE_FAILURE_VERDICT,
+  revision_count: 2,
+  error: {
+    code: "revision_budget_exhausted",
+    message: "The agent used all of its revision attempts without reaching a verified solution.",
     stage: "reviewing",
   },
 })

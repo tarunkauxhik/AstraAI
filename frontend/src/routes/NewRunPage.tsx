@@ -1,7 +1,7 @@
-import { useId, useState, type FormEvent } from "react"
+import { useEffect, useId, useRef, useState, type FormEvent } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Loader2, WifiOff } from "lucide-react"
-import { useNavigate } from "react-router"
+import { useLocation, useNavigate } from "react-router"
 
 import { api } from "@/api/client"
 import { TASK_MAX_LENGTH, type Language } from "@/api/types"
@@ -15,6 +15,35 @@ import { cn } from "@/lib/utils"
 
 /** The counter only appears once the task is long enough for the limit to matter. */
 const COUNTER_THRESHOLD = Math.floor(TASK_MAX_LENGTH * 0.9)
+
+const LANGUAGE_KEY = "astraai:language"
+
+/** The last language used on this device. Storage can be blocked, so it's only a default. */
+function rememberedLanguage(): Language {
+  try {
+    const stored = window.localStorage.getItem(LANGUAGE_KEY)
+    return stored === "cpp" ? "cpp" : "python"
+  } catch {
+    return "python"
+  }
+}
+
+function rememberLanguage(language: Language) {
+  try {
+    window.localStorage.setItem(LANGUAGE_KEY, language)
+  } catch {
+    // Remembering is a convenience only.
+  }
+}
+
+const SUBMIT_HINT =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ ↵" : "Ctrl ↵"
+
+/** "Edit task" on a finished run opens this page with that run's task and language. */
+interface Prefill {
+  task?: string
+  language?: Language
+}
 
 /** Says nothing while the service is reachable; only an outage is worth the space. */
 function ServiceWarning() {
@@ -36,14 +65,24 @@ function ServiceWarning() {
 
 export function NewRunPage() {
   const navigate = useNavigate()
+  const prefill = (useLocation().state ?? {}) as Prefill
   const createRun = useCreateRun()
-  const [task, setTask] = useState("")
-  const [language, setLanguage] = useState<Language>("python")
+  const [task, setTask] = useState(prefill.task ?? "")
+  const [language, setLanguage] = useState<Language>(() => prefill.language ?? rememberedLanguage())
   const [attempted, setAttempted] = useState(false)
+  const textarea = useRef<HTMLTextAreaElement>(null)
   const taskId = useId()
   const hintId = useId()
   const counterId = useId()
   const errorId = useId()
+
+  // Ready to type on desktop; not on touch screens, where focus would pop up the keyboard.
+  useEffect(() => {
+    const element = textarea.current
+    if (!element || !window.matchMedia?.("(pointer: fine)").matches) return
+    element.focus()
+    element.setSelectionRange(element.value.length, element.value.length)
+  }, [])
 
   // Mirrors the backend: strip, then count code points (Python len()), not UTF-16 units.
   // The server rechecks.
@@ -68,15 +107,21 @@ export function NewRunPage() {
     createRun.mutate({ task, language }, { onSuccess: (accepted) => navigate(`/runs/${accepted.run_id}`) })
   }
 
+  function chooseLanguage(value: string) {
+    if (value !== "python" && value !== "cpp") return
+    setLanguage(value)
+    rememberLanguage(value)
+  }
+
   const describedBy = [hintId, showCounter && counterId, taskError && errorId].filter(Boolean).join(" ")
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-2xl flex-col px-4 pb-10 sm:px-6">
-      <header className="flex h-14 items-center">
+      <header className="flex h-12 items-center sm:h-14">
         <Brand />
       </header>
 
-      <main className="flex-1 pt-10 sm:pt-20">
+      <main className="flex-1 pt-8 sm:pt-20">
         <ServiceWarning />
         <form onSubmit={submit} noValidate className="space-y-5">
           <div className="space-y-2">
@@ -86,12 +131,14 @@ export function NewRunPage() {
               </label>
             </h1>
             <p id={hintId} className="text-muted-foreground">
-              AstraAi writes tests and code, checks the result, and asks before accepting it.
+              Describe one self-contained function. AstraAi writes tests and code, runs the tests,
+              and asks you to review the result.
             </p>
           </div>
 
           <div className="space-y-2">
             <Textarea
+              ref={textarea}
               id={taskId}
               value={task}
               onChange={(event) => setTask(event.target.value)}
@@ -112,7 +159,10 @@ export function NewRunPage() {
                 {showCounter && (
                   <p
                     id={counterId}
-                    className={cn("shrink-0 font-mono text-xs text-muted-foreground", length > TASK_MAX_LENGTH && "text-destructive")}
+                    className={cn(
+                      "shrink-0 font-mono text-xs text-muted-foreground",
+                      length > TASK_MAX_LENGTH && "text-destructive",
+                    )}
                   >
                     {length.toLocaleString()} / {TASK_MAX_LENGTH.toLocaleString()}
                   </p>
@@ -136,18 +186,18 @@ export function NewRunPage() {
               type="single"
               variant="outline"
               value={language}
-              onValueChange={(value) => value && setLanguage(value as Language)}
+              onValueChange={chooseLanguage}
               aria-label="Language"
             >
               <ToggleGroupItem
                 value="python"
-                className="px-4 data-[state=on]:border-brand/60 data-[state=on]:bg-brand/10 data-[state=on]:text-foreground"
+                className="h-11 px-4 data-[state=on]:border-brand/60 data-[state=on]:bg-brand/10 data-[state=on]:text-foreground sm:h-9"
               >
                 Python
               </ToggleGroupItem>
               <ToggleGroupItem
                 value="cpp"
-                className="px-4 data-[state=on]:border-brand/60 data-[state=on]:bg-brand/10 data-[state=on]:text-foreground"
+                className="h-11 px-4 data-[state=on]:border-brand/60 data-[state=on]:bg-brand/10 data-[state=on]:text-foreground sm:h-9"
               >
                 C++
               </ToggleGroupItem>
@@ -157,10 +207,18 @@ export function NewRunPage() {
               size="lg"
               disabled={createRun.isPending}
               aria-keyshortcuts="Control+Enter Meta+Enter"
-              className="w-full px-5 sm:w-auto"
+              className="h-11 w-full px-5 sm:h-9 sm:w-auto"
             >
               {createRun.isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
-              {createRun.isPending ? "Starting…" : "Run with AstraAi"}
+              {createRun.isPending ? "Starting…" : "Solve"}
+              {!createRun.isPending && (
+                <kbd
+                  aria-hidden="true"
+                  className="ml-1 hidden font-sans text-xs font-normal opacity-60 pointer-fine:inline"
+                >
+                  {SUBMIT_HINT}
+                </kbd>
+              )}
             </Button>
           </div>
         </form>

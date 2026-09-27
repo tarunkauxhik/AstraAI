@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { createMemoryRouter, RouterProvider } from "react-router"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { NewRunPage } from "@/routes/NewRunPage"
 import { stubFetch } from "@/test/render"
@@ -11,7 +11,9 @@ import { stubFetch } from "@/test/render"
 const EMOJI = "\u{1F600}"
 const QUESTION = "What do you want AstraAi to solve?"
 
-function renderPage({ healthy = true }: { healthy?: boolean } = {}) {
+afterEach(() => window.localStorage.clear())
+
+function renderPage({ healthy = true, state }: { healthy?: boolean; state?: unknown } = {}) {
   const calls = stubFetch((url) =>
     url === "/api/runs"
       ? { status: 202, body: { run_id: "new-run", status: "queued" } }
@@ -24,7 +26,7 @@ function renderPage({ healthy = true }: { healthy?: boolean } = {}) {
       { path: "/", element: <NewRunPage /> },
       { path: "/runs/:runId", element: <p>Run page</p> },
     ],
-    { initialEntries: ["/"] },
+    { initialEntries: [{ pathname: "/", state }] },
   )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -33,7 +35,7 @@ function renderPage({ healthy = true }: { healthy?: boolean } = {}) {
     </QueryClientProvider>,
   )
   const task = screen.getByRole("textbox", { name: QUESTION })
-  const submit = () => fireEvent.click(screen.getByRole("button", { name: "Run with AstraAi" }))
+  const submit = () => fireEvent.click(screen.getByRole("button", { name: "Solve" }))
   const posts = () => calls.filter((call) => call.method === "POST")
   return { task, submit, posts }
 }
@@ -43,11 +45,54 @@ describe("new run", () => {
     renderPage()
 
     expect(screen.getByRole("heading", { level: 1, name: QUESTION })).toBeTruthy()
-    expect(screen.getByText("AstraAi writes tests and code, checks the result, and asks before accepting it.")).toBeTruthy()
+    expect(screen.getByText(/Describe one self-contained function/)).toBeTruthy()
     expect(screen.getByRole("radiogroup", { name: "Language" })).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Run with AstraAi" })).toBeTruthy()
+    const solve = screen.getByRole("button", { name: "Solve" })
+    // The shortcut is shown next to the action and announced as a key shortcut.
+    expect(solve.getAttribute("aria-keyshortcuts")).toBe("Control+Enter Meta+Enter")
+    expect(solve.querySelector("kbd")?.textContent).toMatch(/↵/)
     // No flow chips, counter or service chatter while everything is fine.
     expect(document.body.textContent).not.toMatch(/sandbox|20,000|Service online|Sandbox run/i)
+  })
+
+  it("submits with Ctrl+Enter from the task box", async () => {
+    const { task, posts } = renderPage()
+
+    fireEvent.change(task, { target: { value: "Reverse a string." } })
+    fireEvent.keyDown(task, { key: "Enter", ctrlKey: true })
+
+    await waitFor(() => expect(posts()).toHaveLength(1))
+  })
+
+  it("opens with the task and language of a run being edited", () => {
+    const { task } = renderPage({ state: { task: "Reverse a string, keeping emoji intact.", language: "cpp" } })
+
+    expect((task as HTMLTextAreaElement).value).toBe("Reverse a string, keeping emoji intact.")
+    expect(screen.getByRole("radio", { name: "C++" }).getAttribute("aria-checked")).toBe("true")
+  })
+
+  it("remembers the last language chosen on this device", () => {
+    renderPage()
+    fireEvent.click(screen.getByRole("radio", { name: "C++" }))
+    expect(window.localStorage.getItem("astraai:language")).toBe("cpp")
+
+    cleanup()
+    renderPage()
+    expect(screen.getByRole("radio", { name: "C++" }).getAttribute("aria-checked")).toBe("true")
+  })
+
+  it("is ready to type with a mouse, but doesn't pop up a phone keyboard", () => {
+    const pointer = (fine: boolean) =>
+      vi.stubGlobal("matchMedia", (query: string) => ({ matches: fine && query === "(pointer: fine)" }))
+
+    pointer(true)
+    const { task } = renderPage()
+    expect(document.activeElement).toBe(task)
+
+    cleanup()
+    pointer(false)
+    const touch = renderPage()
+    expect(document.activeElement).not.toBe(touch.task)
   })
 
   it("mentions the service only when it can't be reached", async () => {

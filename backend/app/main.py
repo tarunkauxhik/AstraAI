@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -37,6 +38,11 @@ class RunRequest(BaseModel):
 class RunAccepted(BaseModel):
     run_id: str
     status: RunStatus
+
+
+class ApprovalExtended(BaseModel):
+    run_id: str
+    approval_expires_at: datetime
 
 
 def build_run_manager(settings: Settings, context: GraphContext) -> RunManager:
@@ -99,6 +105,20 @@ def run_not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
 
 
+def approval_expired() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="The approval request has expired.",
+    )
+
+
+def not_waiting() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="The run is not waiting for approval.",
+    )
+
+
 @app.post("/runs", status_code=status.HTTP_202_ACCEPTED)
 async def create_run(
     run: RunRequest, runs: Annotated[RunManager, Depends(get_run_manager)]
@@ -124,20 +144,32 @@ async def decide_approval(
     except RunNotFoundError as exc:
         raise run_not_found() from exc
     except ApprovalExpiredError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="The approval request has expired.",
-        ) from exc
+        raise approval_expired() from exc
     except ApprovalConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="The run is not waiting for approval.",
-        ) from exc
+        raise not_waiting() from exc
     except QueueFullError as exc:
         raise queue_full() from exc
     except RunManagerStoppedError as exc:
         raise shutting_down() from exc
     return RunAccepted(run_id=decided.run_id, status=decided.status)
+
+
+@app.post("/runs/{run_id}/approval/extend")
+async def extend_approval(
+    run_id: str, runs: Annotated[RunManager, Depends(get_run_manager)]
+) -> ApprovalExtended:
+    """Restart the approval window from now, so a slow review never runs out unwarned."""
+    try:
+        extended = await runs.extend_approval(run_id)
+    except RunNotFoundError as exc:
+        raise run_not_found() from exc
+    except ApprovalExpiredError as exc:
+        raise approval_expired() from exc
+    except ApprovalConflictError as exc:
+        raise not_waiting() from exc
+    except RunManagerStoppedError as exc:
+        raise shutting_down() from exc
+    return ApprovalExtended.model_validate(extended, from_attributes=True)
 
 
 @app.get("/runs/{run_id}")

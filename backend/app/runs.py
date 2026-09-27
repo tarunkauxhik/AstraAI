@@ -32,7 +32,15 @@ from app.state import (
 
 logger = logging.getLogger(__name__)
 
-RunStatus = Literal["queued", "running", "waiting_for_approval", "completed", "failed"]
+RunStatus = Literal[
+    "queued",
+    "running",
+    "waiting_for_approval",
+    "completed",
+    "failed",
+    # Nobody decided in time. Not a failure: the verified solution and its evidence stay.
+    "expired",
+]
 Decision = Literal["approve", "reject"]
 RunStage = Literal[
     "queued",
@@ -48,7 +56,9 @@ RunStage = Literal[
     "resuming",
     "completed",
     "failed",
+    "expired",
 ]
+FINISHED_STATUSES: frozenset[RunStatus] = frozenset({"completed", "failed", "expired"})
 
 # The stage a run is in while each graph node works. Presentation only: nodes never see it.
 NODE_STAGES: dict[str, RunStage] = {
@@ -142,7 +152,6 @@ SHUTDOWN_GRACE_SECONDS = 30
 RUN_TIMEOUT_MESSAGE = "The run took longer than the allowed time and was stopped."
 SHUTDOWN_MESSAGE = "The run was stopped because the service is shutting down."
 REJECTED_MESSAGE = "A human rejected the verified solution."
-EXPIRED_MESSAGE = "Nobody approved or rejected the verified solution in time."
 # How often waiting runs are checked for an expired approval request.
 APPROVAL_SWEEP_SECONDS = 60
 # Safe explanations for runs that end without a verified solution, by repair decision.
@@ -289,12 +298,12 @@ class RunManager:
     def get(self, run_id: str) -> Run | None:
         return self._runs.get(run_id)
 
-    async def resolve_approval(self, run_id: str, decision: Decision) -> Run:
-        """Apply a human decision to a run waiting for approval.
+    async def _waiting_run(self, run_id: str) -> Run:
+        """The run, if it is still waiting for a human; otherwise raise why not.
 
-        Approval queues the run to resume on its own thread; rejection ends it at once.
-        Every check and state change happens before the first await, so on the event loop
-        exactly one of approval, rejection, expiry or shutdown wins for a run.
+        Returns without awaiting, so a caller's own changes still happen before its first
+        await: on the event loop exactly one of approval, rejection, extension, expiry or
+        shutdown wins for a run.
         """
         if self._stopping:
             raise RunManagerStoppedError
@@ -310,6 +319,24 @@ class RunManager:
             self._expire(run_id)
             await self._graph.checkpointer.adelete_thread(run_id)
             raise ApprovalExpiredError
+        return run
+
+    async def extend_approval(self, run_id: str) -> Run:
+        """Give a waiting run a fresh approval window, counted from now.
+
+        People who need longer to review can ask for more time as often as they like, so
+        the timeout only ever ends a review nobody is attending to.
+        """
+        await self._waiting_run(run_id)
+        self._update(run_id, approval_expires_at=self._clock() + self._approval_timeout)
+        return self._runs[run_id]
+
+    async def resolve_approval(self, run_id: str, decision: Decision) -> Run:
+        """Apply a human decision to a run waiting for approval.
+
+        Approval queues the run to resume on its own thread; rejection ends it at once.
+        """
+        run = await self._waiting_run(run_id)
         if decision == "reject":
             self._update(
                 run_id,
@@ -350,21 +377,15 @@ class RunManager:
         )
 
     def _expire(self, run_id: str) -> None:
+        # The work succeeded; only the decision lapsed. So the run keeps its verified
+        # solution and evidence, carries no error, and just can't be decided any more.
         logger.warning("Run %s: approval request expired", run_id)
         self._update(
-            run_id,
-            status="failed",
-            stage="failed",
-            approval_status="expired",
-            error=RunError(
-                code="approval_expired",
-                message=EXPIRED_MESSAGE,
-                stage="waiting_for_approval",
-            ),
+            run_id, status="expired", stage="expired", approval_status="expired"
         )
 
     async def expire_approvals(self) -> list[str]:
-        """Fail every run whose approval request has expired and drop its checkpoint."""
+        """End every run whose approval request has expired and drop its checkpoint."""
         if self._stopping:
             return []
         expired = [
@@ -441,7 +462,7 @@ class RunManager:
                     approval_expires_at=requested_at + self._approval_timeout,
                 )
         finally:
-            if self._runs[run_id].status in ("completed", "failed"):
+            if self._runs[run_id].status in FINISHED_STATUSES:
                 await self._graph.checkpointer.adelete_thread(run_id)
 
     async def _drive_graph(
@@ -557,7 +578,7 @@ class RunManager:
         finished = [
             run_id
             for run_id, run in self._runs.items()
-            if run.status in ("completed", "failed")
+            if run.status in FINISHED_STATUSES
         ]
         for run_id in finished[:excess]:
             del self._runs[run_id]

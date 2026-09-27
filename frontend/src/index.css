@@ -108,13 +108,6 @@
   }
   body {
     @apply min-h-dvh bg-background text-foreground;
-    /* Ambient treatment: one faint wash at the top, never behind content panels. */
-    background-image: radial-gradient(
-      70rem 26rem at 50% -12rem,
-      oklch(0.8 0.09 205 / 5%),
-      transparent 70%
-    );
-    background-repeat: no-repeat;
   }
   /* Code must show exactly what was generated: no "==" or "::" ligatures. */
   code,
@@ -136,13 +129,6 @@
   }
   details[open] > summary > .disclosure-chevron {
     transform: rotate(90deg);
-  }
-
-  /* Compact section labels. */
-  .label-caps {
-    font-variant-caps: all-small-caps;
-    letter-spacing: 0.06em;
-    @apply text-[0.8125rem] leading-none font-semibold text-muted-foreground;
   }
 }
 

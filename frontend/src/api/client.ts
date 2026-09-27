@@ -1,5 +1,6 @@
 import type {
   ApprovalDecision,
+  ApprovalExtended,
   HealthResponse,
   Run,
   RunAccepted,
@@ -138,4 +139,7 @@ export const api = {
 
   decideApproval: (runId: string, decision: ApprovalDecision) =>
     postJson<RunAccepted>(`/runs/${encodeURIComponent(runId)}/approval`, { decision }),
+
+  extendApproval: (runId: string) =>
+    request<ApprovalExtended>(`/runs/${encodeURIComponent(runId)}/approval/extend`, { method: "POST" }),
 }

@@ -1,11 +1,13 @@
+import type { ReactNode } from "react"
+
 import { CopyButton } from "@/components/CopyButton"
 
 interface CodeViewerProps {
   code: string
   /** Accessible name and visible caption, e.g. "solution.py". */
   label: string
-  /** Optional extra caption content, e.g. a language badge. */
-  meta?: React.ReactNode
+  /** Extra caption content after the label, e.g. the language and verification status. */
+  meta?: ReactNode
 }
 
 /** Read-only code with line numbers. Always plain text: nothing is rendered as HTML. */
@@ -14,13 +16,10 @@ export function CodeViewer({ code, label, meta }: CodeViewerProps) {
 
   return (
     <figure className="overflow-hidden rounded-lg border bg-[oklch(0.135_0.004_250)]">
-      <figcaption className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
-        <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate font-mono text-xs text-muted-foreground">{label}</span>
+      <figcaption className="flex items-center justify-between gap-2 border-b py-1 pr-1.5 pl-3">
+        <span className="flex min-w-0 flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+          <span className="truncate font-mono">{label}</span>
           {meta}
-          <span className="text-xs text-muted-foreground/70">
-            {lines.length} {lines.length === 1 ? "line" : "lines"}
-          </span>
         </span>
         <CopyButton text={code} label={label} />
       </figcaption>

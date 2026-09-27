@@ -15,7 +15,7 @@ export function OutputBlock({ label, text, defaultOpen, tone = "default" }: Outp
   const lines = text.replace(/\n$/, "").split("\n").length
   return (
     <details open={defaultOpen} className="rounded-md border bg-[oklch(0.135_0.004_250)]">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 select-none [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 select-none pointer-coarse:min-h-11 [&::-webkit-details-marker]:hidden">
         <ChevronRight
           className="disclosure-chevron size-3.5 text-muted-foreground"
           aria-hidden="true"

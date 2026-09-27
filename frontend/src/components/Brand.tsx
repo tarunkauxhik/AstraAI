@@ -1,5 +1,7 @@
 import { Link } from "react-router"
 
+import { cn, TOUCH_TARGET } from "@/lib/utils"
+
 export function BrandMark({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 32 32" aria-hidden="true" className={className}>
@@ -13,7 +15,7 @@ export function Brand() {
   return (
     <Link
       to="/"
-      className="flex shrink-0 items-center gap-2 rounded-md font-semibold tracking-tight"
+      className={cn(TOUCH_TARGET, "flex shrink-0 items-center gap-2 rounded-md font-semibold tracking-tight")}
       aria-label="AstraAi home"
     >
       <BrandMark className="size-6" />

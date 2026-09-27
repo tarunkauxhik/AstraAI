@@ -49,13 +49,3 @@ export function waitingFor(run: Run, { startedMsAgo, expiresInMs }: { startedMsA
     approval_expires_at: new Date(now + expiresInMs).toISOString(),
   }
 }
-
-/** Simulate the desktop layout or a narrower screen for useMediaQuery. */
-export function setViewport(kind: "desktop" | "mobile") {
-  vi.stubGlobal("matchMedia", (query: string) => ({
-    matches: kind === "desktop" && query.includes("min-width"),
-    media: query,
-    addEventListener: () => undefined,
-    removeEventListener: () => undefined,
-  }))
-}

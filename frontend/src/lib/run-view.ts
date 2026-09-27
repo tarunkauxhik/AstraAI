@@ -4,8 +4,9 @@
  */
 import type { ApiError } from "@/api/client"
 import { NETWORK_ERROR_DETAIL } from "@/api/client"
-import type { ErrorCode, Run, RunStage } from "@/api/types"
-import { describeError, type Tone } from "@/lib/labels"
+import type { ErrorCode, ExecutionResult, Run, RunStage } from "@/api/types"
+import { formatCount } from "@/lib/format"
+import { describeFailure, STAGE_ACTIVITY, type FailureKind } from "@/lib/labels"
 
 // ---------------------------------------------------------------------------------------
 // Semantic state
@@ -16,6 +17,7 @@ export type RunPhase =
   | "resuming"
   | "awaiting_approval"
   | "completed"
+  | "expired"
   | "failed"
 
 /** Top-level status always wins; stage only refines a running run. */
@@ -25,6 +27,8 @@ export function runPhase(run: Run): RunPhase {
       return "failed"
     case "completed":
       return "completed"
+    case "expired":
+      return "expired"
     case "waiting_for_approval":
       return "awaiting_approval"
     case "running":
@@ -35,7 +39,12 @@ export function runPhase(run: Run): RunPhase {
 }
 
 export function isTerminal(run: Run): boolean {
-  return run.status === "completed" || run.status === "failed"
+  return run.status === "completed" || run.status === "failed" || run.status === "expired"
+}
+
+/** Still in AstraAi's hands: nothing to decide yet. */
+export function isWorking(run: Run): boolean {
+  return run.status === "queued" || run.status === "running"
 }
 
 export type PageState =
@@ -52,11 +61,6 @@ export function pageState(data: Run | undefined, error: ApiError | null): PageSt
   if (error?.isNotFound) return { kind: "not_found" }
   if (data === undefined) return error ? { kind: "unreachable", error } : { kind: "loading" }
   return { kind: "run", run: data, phase: runPhase(data), connectionError: error }
-}
-
-/** Approve/Reject controls exist only while the server says it is waiting. */
-export function showApprovalControls(run: Run): boolean {
-  return run.status === "waiting_for_approval"
 }
 
 // ---------------------------------------------------------------------------------------
@@ -110,91 +114,386 @@ export function evidenceAttempt(run: Run, freshness: Freshness): number {
   return freshness === "stale" ? attempt - 1 : attempt
 }
 
-/** A re-execution of unchanged code after a sandbox infrastructure error. */
-export function isRetryingExecution(run: Run): boolean {
-  return (
-    evidenceStage(run) === "executing" &&
-    run.execution_retry_count > 0 &&
-    run.execution_result?.status === "infrastructure_error"
-  )
+/** The execution result only if it describes the code and tests shown now. */
+function currentExecution(run: Run): ExecutionResult | null {
+  return executionFreshness(run) === "current" ? run.execution_result : null
+}
+
+function currentReview(run: Run) {
+  return criticFreshness(run) === "current" ? run.critic_result : null
 }
 
 // ---------------------------------------------------------------------------------------
-// Progress (derived from the current state only; there is no event history)
+// Test evidence
 
-export type ProgressStepId = "understand" | "build" | "verify" | "approve"
-/** "stopped" marks where a failed run ended; its tone says how serious that is. */
-export type ProgressState = "done" | "current" | "upcoming" | "stopped"
-
-export interface ProgressStep {
-  id: ProgressStepId
-  label: string
-  state: ProgressState
-}
-
-export interface Progress {
-  steps: ProgressStep[]
-  /** Tone of the stop, when the run failed inside a step. A rejection is neutral. */
-  stopTone: Tone | null
-}
-
-const PROGRESS_STEPS: readonly { id: ProgressStepId; label: string }[] = [
-  { id: "understand", label: "Understand" },
-  { id: "build", label: "Build" },
-  { id: "verify", label: "Verify" },
-  { id: "approve", label: "Approve" },
-]
-
-/** Step index per backend stage: -1 before any step, 4 once every step is done. */
-const STAGE_PROGRESS: Record<RunStage, number> = {
-  queued: -1,
-  analyzing: 0,
-  generating_tests: 1,
-  generating_code: 1,
-  executing: 2,
-  reviewing: 2,
-  revising_code: 2,
-  revising_tests: 2,
-  waiting_for_approval: 3,
-  resuming: 3,
-  completed: 4,
-  // Never an error.stage in practice; a failed run is placed by its error instead.
-  failed: -1,
-}
-
-export function progress(run: Run): Progress {
-  const failed = run.status === "failed"
-  const at = failed ? (run.error ? STAGE_PROGRESS[run.error.stage] : -1) : STAGE_PROGRESS[run.stage]
-  const steps = PROGRESS_STEPS.map(({ id, label }, index): ProgressStep => {
-    let state: ProgressState = "upcoming"
-    if (index < at) state = "done"
-    else if (index === at) state = failed ? "stopped" : "current"
-    return { id, label, state }
-  })
-  const stopped = failed && at >= 0 && at < PROGRESS_STEPS.length
-  return { steps, stopTone: stopped ? describeError(run.error).tone : null }
+export interface FailedCase {
+  /** Case name as the test program printed it. */
+  name: string
+  /** The whole FAIL line, exactly as printed. */
+  line: string
+  expected: string | null
+  actual: string | null
 }
 
 /**
- * One sentence of context while AstraAi repeats verification, or null on a first attempt.
- * Everything here comes from server counters and stage; nothing is inferred beyond them.
+ * The test program must print `FAIL <case>: expected <x>, got <y>` per failure; the backend
+ * counts failures from the same lines, so these match its `tests_failed`.
  */
-export function workingNote(run: Run): string | null {
-  const attempt = executionAttempt(run)
-  switch (run.stage) {
-    case "revising_code":
-      return `Found an issue — repairing the solution (attempt ${attempt + 1}).`
-    case "revising_tests":
-      return `Found an issue — repairing the tests (attempt ${attempt + 1}).`
-    case "executing":
-    case "reviewing":
-      if (attempt === 1) return null
-      if (isRetryingExecution(run)) return `Verification didn't run — trying again (attempt ${attempt}).`
-      return run.revision_count > 0
-        ? `Checking the repaired version (attempt ${attempt}).`
-        : `Verifying again (attempt ${attempt}).`
+export function failedCases(result: ExecutionResult): FailedCase[] {
+  const cases: FailedCase[] = []
+  for (const raw of result.stdout.split("\n")) {
+    const line = raw.trimEnd()
+    const match = /^FAIL (\S+?):?(?: (.*))?$/.exec(line)
+    if (!match) continue
+    const values = /^expected (.*), got (.*)$/.exec(match[2] ?? "")
+    cases.push({ name: match[1], line, expected: values?.[1] ?? null, actual: values?.[2] ?? null })
+  }
+  return cases
+}
+
+function tests(count: number): string {
+  return count === 1 ? "test" : "tests"
+}
+
+/** One line for a finished test run, e.g. "8 of 8 tests passed". Counts as reported. */
+export function testRunSummary(result: ExecutionResult, planned: number | null): string {
+  switch (result.status) {
+    case "passed":
+      return result.tests_passed !== null
+        ? `${result.tests_passed} of ${result.tests_passed} ${tests(result.tests_passed)} passed`
+        : "The tests passed"
+    case "failed": {
+      if (result.error_type === "compile_error") return "The tests didn't compile"
+      const failed = result.tests_failed ?? 0
+      if (failed === 0) return "The tests stopped with an error"
+      return planned !== null && planned >= failed
+        ? `${failed} of ${planned} ${tests(planned)} failed`
+        : `${formatCount(failed, "test")} failed`
+    }
+    case "timed_out":
+      return "The tests hit the time limit"
+    case "resource_exceeded":
+      return "The tests hit the memory limit"
+    case "infrastructure_error":
+      return "The tests couldn't run"
+  }
+}
+
+export type CaseStatus = "passed" | "failed" | null
+
+export interface CaseEvidence {
+  status: CaseStatus
+  /** What the code returned, when the test program reported it. */
+  actual: string | null
+}
+
+export interface TestReport {
+  /** Short header, e.g. "8 passed", "1 failed", "Running…". */
+  summary: string
+  /** Evidence per planned case name; missing names have no known status. */
+  cases: Map<string, CaseEvidence>
+  /** Reported failures whose names match no planned case. */
+  unmatched: FailedCase[]
+}
+
+/**
+ * Per-case evidence from the current execution only. A case is marked passed only when the
+ * program reported every planned case passing; a stale result marks nothing.
+ */
+export function testReport(run: Run): TestReport {
+  const planned = run.generated_tests?.cases ?? []
+  const cases = new Map<string, CaseEvidence>()
+  const result = run.execution_result
+  const working = isWorking(run)
+
+  if (result === null) {
+    const summary = !working ? "Not run" : run.stage === "executing" ? "Running…" : "Not run yet"
+    return { summary, cases, unmatched: [] }
+  }
+  if (executionFreshness(run) === "stale") {
+    return { summary: working ? "Running again…" : "Not finished", cases, unmatched: [] }
+  }
+
+  const failures = failedCases(result)
+  const names = new Set(planned.map((testCase) => testCase.name))
+  let summary: string
+  switch (result.status) {
+    case "passed":
+      summary = result.tests_passed !== null ? `${result.tests_passed} passed` : "Passed"
+      if (result.tests_passed === planned.length && result.tests_failed === 0) {
+        for (const testCase of planned) cases.set(testCase.name, { status: "passed", actual: null })
+      }
+      break
+    case "failed":
+      summary =
+        result.error_type === "compile_error"
+          ? "Didn't compile"
+          : failures.length > 0
+            ? `${result.tests_failed ?? failures.length} failed`
+            : "Stopped with an error"
+      break
+    case "timed_out":
+      summary = "Time limit reached"
+      break
+    case "resource_exceeded":
+      summary = "Memory limit reached"
+      break
+    case "infrastructure_error":
+      summary = "Couldn't run"
+      break
+  }
+  for (const failure of failures) {
+    if (names.has(failure.name)) cases.set(failure.name, { status: "failed", actual: failure.actual })
+  }
+  return { summary, cases, unmatched: failures.filter((failure) => !names.has(failure.name)) }
+}
+
+// ---------------------------------------------------------------------------------------
+// The displayed code's verification
+
+export type CodeStatus = "checking" | "verified" | "not_verified"
+
+/**
+ * Whether the code on screen passed its checks: the tests passed and the AI review agreed,
+ * both on this exact version. Anything stale or still running is "checking".
+ */
+export function codeStatus(run: Run): CodeStatus {
+  const result = currentExecution(run)
+  const review = currentReview(run)
+  if (result?.status === "passed" && review?.verdict === "pass") return "verified"
+  if (isWorking(run) && (result === null || (result.status === "passed" && review === null))) {
+    return "checking"
+  }
+  return "not_verified"
+}
+
+export interface Evidence {
+  text: string
+  /** Raw program output, or the AI review's finding. */
+  source: "output" | "review"
+}
+
+/** The first thing that shows why verification failed: a failing test, an error, or the review. */
+export function failingEvidence(run: Run): Evidence | null {
+  const result = currentExecution(run)
+  if (result && result.status !== "passed" && result.status !== "infrastructure_error") {
+    const failure = failedCases(result)[0]
+    if (failure) return { text: clip(failure.line), source: "output" }
+    const errors = result.stderr.split("\n").map((line) => line.trim()).filter(Boolean)
+    const line =
+      errors.find((error) => /error/i.test(error)) ??
+      errors.at(-1) ??
+      result.stdout.split("\n").map((output) => output.trim()).find(Boolean)
+    if (line) return { text: clip(line), source: "output" }
+  }
+  const review = currentReview(run)
+  // "No usable test result" is about the sandbox, not the code, so it isn't evidence.
+  if (review && review.verdict !== "pass" && review.verdict !== "execution_failure") {
+    const issue = review.code_issue || review.test_issue || review.reason
+    if (issue) return { text: clip(issue), source: "review" }
+  }
+  return null
+}
+
+function clip(text: string, max = 240): string {
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
+}
+
+// ---------------------------------------------------------------------------------------
+// Work in progress (derived from the current state only; there is no event history)
+
+export type StepId = "analyze" | "tests" | "solution" | "run" | "review"
+export type StepState = "done" | "current" | "pending"
+
+export interface WorkStep {
+  id: StepId
+  state: StepState
+  label: string
+  /** A second line, e.g. what is being fixed. */
+  detail?: string
+  /** A finished step that found a problem, e.g. failing tests. */
+  problem?: boolean
+}
+
+/** The first sentence of a review note: enough to say what is being fixed. */
+function firstSentence(text: string): string {
+  const sentence = /^.*?[.!?](?=\s|$)/.exec(text.trim())?.[0] ?? text.trim()
+  return clip(sentence, 160)
+}
+
+/**
+ * What AstraAi has done and is doing, in facts that exist on the run. A repair sends its
+ * step back to "current" with what is being fixed; attempt numbers stay in the run log.
+ */
+export function workSteps(run: Run): WorkStep[] {
+  const stage = run.stage
+  const planned = run.generated_tests?.cases.length ?? null
+  const review = run.critic_result
+  const result = currentExecution(run)
+
+  const analyze: WorkStep =
+    stage === "analyzing"
+      ? { id: "analyze", state: "current", label: "Analyzing the task…" }
+      : run.requirements
+        ? { id: "analyze", state: "done", label: "Task analyzed" }
+        : { id: "analyze", state: "pending", label: "Analyze the task" }
+
+  const tests: WorkStep =
+    stage === "revising_tests"
+      ? {
+          id: "tests",
+          state: "current",
+          label: "Fixing the tests…",
+          detail: review ? firstSentence(review.test_issue || review.reason) : undefined,
+        }
+      : stage === "generating_tests"
+        ? { id: "tests", state: "current", label: "Writing tests…" }
+        : planned !== null
+          ? { id: "tests", state: "done", label: `${formatCount(planned, "test")} written` }
+          : { id: "tests", state: "pending", label: "Write tests" }
+
+  const solution: WorkStep =
+    stage === "revising_code"
+      ? {
+          id: "solution",
+          state: "current",
+          label: "Fixing the solution…",
+          detail: review ? firstSentence(review.code_issue || review.reason) : undefined,
+        }
+      : stage === "generating_code"
+        ? { id: "solution", state: "current", label: "Writing the solution…" }
+        : run.generated_code
+          ? { id: "solution", state: "done", label: "Solution written" }
+          : { id: "solution", state: "pending", label: "Write the solution" }
+
+  const runStep: WorkStep =
+    stage === "executing"
+      ? {
+          id: "run",
+          state: "current",
+          label: executionAttempt(run) > 1 ? "Running the tests again…" : "Running the tests…",
+        }
+      : stage === "reviewing" && result
+        ? {
+            id: "run",
+            state: "done",
+            label: testRunSummary(result, planned),
+            problem: result.status !== "passed",
+          }
+        : { id: "run", state: "pending", label: "Run the tests" }
+
+  const reviewStep: WorkStep =
+    stage === "reviewing"
+      ? { id: "review", state: "current", label: "Reviewing the solution…" }
+      : { id: "review", state: "pending", label: "AI review" }
+
+  return [analyze, tests, solution, runStep, reviewStep]
+}
+
+// ---------------------------------------------------------------------------------------
+// Endings
+
+export type EndingTone = "success" | "attention" | "neutral"
+export type EndingAction = "copy" | "new_run" | "run_again" | "edit" | "log"
+
+export interface Ending {
+  kind: FailureKind | "accepted" | "expired"
+  title: string
+  description: string
+  tone: EndingTone
+  actions: EndingAction[]
+  /** The run log explains this ending, so it opens by itself. */
+  openLog: boolean
+}
+
+/**
+ * How long AstraAi worked: until it asked for a review, or until the run ended. Null while
+ * it is still working (the live clock covers that).
+ */
+export function workDurationMs(run: Run): number | null {
+  const end = run.approval_requested_at ?? (isTerminal(run) ? run.updated_at : null)
+  if (end === null) return null
+  const span = Date.parse(end) - Date.parse(run.created_at)
+  return Number.isNaN(span) ? null : Math.max(0, span)
+}
+
+/** Whether the run log has anything to show yet. */
+export function hasRunLog(run: Run): boolean {
+  return run.execution_result !== null || run.critic_result !== null || run.error !== null
+}
+
+/** Why a run couldn't be verified, from the evidence that stopped it. */
+function unverifiedDescription(run: Run): string {
+  const result = currentExecution(run)
+  const planned = run.generated_tests?.cases.length ?? null
+  const fixes = run.revision_count > 0 ? " after the available fixes" : ""
+  if (result && result.status !== "passed" && result.status !== "infrastructure_error") {
+    return `${testRunSummary(result, planned)}${fixes}.`
+  }
+  const review = currentReview(run)
+  if (result?.status === "passed" && review && review.verdict !== "pass") {
+    return run.revision_count > 0
+      ? "The tests passed, but the AI review found a problem the fixes didn't resolve."
+      : "The tests passed, but the AI review found a problem."
+  }
+  return "AstraAi couldn't confirm that the solution is correct."
+}
+
+/** How a finished run is presented: one title, one sentence, and the ways forward. */
+export function describeEnding(run: Run): Ending {
+  if (run.status === "completed") {
+    return {
+      kind: "accepted",
+      title: "Accepted",
+      description: "All checks passed",
+      tone: "success",
+      actions: ["copy", "new_run"],
+      openLog: false,
+    }
+  }
+  if (run.status === "expired") {
+    return {
+      kind: "expired",
+      title: "Not reviewed in time",
+      description:
+        "All checks passed, but the review window closed. The solution and its tests are still here.",
+      tone: "neutral",
+      actions: ["copy", "run_again"],
+      openLog: false,
+    }
+  }
+  const failure = describeFailure(run.error)
+  switch (failure.kind) {
+    case "rejected":
+      return { ...failure, tone: "neutral", actions: ["edit", "run_again"], openLog: false }
+    case "unverified":
+      return {
+        ...failure,
+        description: unverifiedDescription(run),
+        tone: "attention",
+        actions: ["run_again", "edit", "log"],
+        openLog: true,
+      }
+    case "timeout":
+      return { ...failure, tone: "neutral", actions: ["run_again", "edit"], openLog: false }
     default:
-      return null
+      return { ...failure, tone: "neutral", actions: ["run_again"], openLog: false }
+  }
+}
+
+/** One short phrase for the page title and the polite live region. */
+export function announcement(run: Run): string {
+  switch (runPhase(run)) {
+    case "queued":
+      return "Waiting to start"
+    case "working":
+      return STAGE_ACTIVITY[run.stage]
+    case "resuming":
+      return "Accepting"
+    case "awaiting_approval":
+      return "Ready for review"
+    default:
+      return describeEnding(run).title
   }
 }
 
@@ -252,15 +551,9 @@ export interface Countdown {
   reached: boolean
   /** "9:41", or "1:02:03" for an hour or more. */
   label: string
-  /** Share of the approval window left, 0–1, when the start time is known. */
-  fraction: number | null
 }
 
-export function approvalCountdown(
-  requestedAt: string | null,
-  expiresAt: string,
-  nowMs: number,
-): Countdown {
+export function approvalCountdown(expiresAt: string, nowMs: number): Countdown {
   const end = Date.parse(expiresAt)
   const remainingMs = Number.isNaN(end) ? 0 : Math.max(0, end - nowMs)
   const totalSeconds = Math.ceil(remainingMs / 1000)
@@ -269,11 +562,7 @@ export function approvalCountdown(
   const seconds = String(totalSeconds % 60).padStart(2, "0")
   const label =
     hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`
-  const start = requestedAt === null ? Number.NaN : Date.parse(requestedAt)
-  const window = end - start
-  const fraction =
-    Number.isNaN(window) || window <= 0 ? null : Math.min(1, Math.max(0, remainingMs / window))
-  return { remainingMs, reached: remainingMs === 0, label, fraction }
+  return { remainingMs, reached: remainingMs === 0, label }
 }
 
 // ---------------------------------------------------------------------------------------

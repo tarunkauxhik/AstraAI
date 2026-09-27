@@ -64,7 +64,7 @@ def test_run_lifecycle_over_http(monkeypatch: pytest.MonkeyPatch) -> None:
                 response = client.post(f"/runs/{run_id}/approval", json=decision)
                 assert response.status_code == 202
                 approved = True
-            if run["status"] in ("completed", "failed"):
+            if run["status"] in ("completed", "failed", "expired"):
                 break
             assert time.monotonic() < deadline, f"stuck at {run['stage']}"
             time.sleep(0.02)

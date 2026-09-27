@@ -21,7 +21,7 @@ export function Disclosure({ summary, children, id, open, onOpenChange, classNam
       onToggle={(event) => onOpenChange?.(event.currentTarget.open)}
       className={className}
     >
-      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-sm py-1 text-sm text-muted-foreground select-none hover:text-foreground [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-sm py-1 text-sm pointer-coarse:min-h-11 text-muted-foreground select-none hover:text-foreground [&::-webkit-details-marker]:hidden">
         <ChevronRight
           className="disclosure-chevron size-4 shrink-0"
           aria-hidden="true"

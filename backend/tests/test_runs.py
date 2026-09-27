@@ -16,7 +16,6 @@ from app.runs import (
     Decision,
     QueueFullError,
     Run,
-    RunError,
     RunManager,
     RunManagerStoppedError,
     RunNotFoundError,
@@ -101,7 +100,9 @@ async def run_to_end(
     """Wait until a run finishes, answering its approval request with `decision`."""
     if (await run_to_rest(runs, run_id)).status == "waiting_for_approval":
         await runs.resolve_approval(run_id, decision)
-        await wait_until(lambda: runs.get(run_id).status in ("completed", "failed"))
+        await wait_until(
+            lambda: runs.get(run_id).status in ("completed", "failed", "expired")
+        )
     return runs.get(run_id)
 
 
@@ -913,20 +914,19 @@ def test_an_unanswered_run_expires_and_releases_its_checkpoint(
         finally:
             await runs.stop()
 
-        assert (run.status, run.stage) == ("failed", "failed")
+        # Not a failure: only the decision lapsed, so there is no error to report.
+        assert (run.status, run.stage, run.error) == ("expired", "expired", None)
         assert (run.approval_status, run.approval_required) == ("expired", False)
-        assert run.error == RunError(
-            code="approval_expired",
-            message="Nobody approved or rejected the verified solution in time.",
-            stage="waiting_for_approval",
-        )
-        # Latest artifacts stay; nothing resumed, called the LLM or ran the sandbox.
+        # The verified work and its evidence stay; nothing resumed, called the LLM or
+        # ran the sandbox.
         assert run.generated_code == GeneratedCode.model_validate(VALID_PYTHON_CODE)
         assert run.execution_result == PASSED
+        assert run.critic_result is not None
+        assert run.approval_request is not None
         assert (len(llm.calls), len(sandbox.calls)) == work
         assert stages[stages.index("waiting_for_approval") :] == [
             "waiting_for_approval",
-            "failed",
+            "expired",
         ]
 
     asyncio.run(scenario())
@@ -955,13 +955,133 @@ def test_an_expired_run_cannot_be_decided(decision: Decision, swept: bool) -> No
         finally:
             await runs.stop()
 
-        assert (run.status, run.approval_status, run.error.code) == (
-            "failed",
+        assert (run.status, run.approval_status, run.error) == (
             "expired",
-            "approval_expired",
+            "expired",
+            None,
         )
         assert not checkpoint
         assert (len(llm.calls), len(sandbox.calls)) == work
+
+    asyncio.run(scenario())
+
+
+def test_more_time_restarts_the_approval_window_from_now() -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        runs, _, _ = approval_manager(clock)
+        await runs.start()
+        try:
+            run_id = await paused(runs)
+            asked = runs.get(run_id)
+            clock.advance(500)
+            extended = await runs.extend_approval(run_id)
+            clock.advance(599)
+            early = await runs.expire_approvals()
+            clock.advance(1)
+            late = await runs.expire_approvals()
+            run = runs.get(run_id)
+        finally:
+            await runs.stop()
+
+        assert extended.approval_expires_at == asked.approval_requested_at + timedelta(
+            seconds=1_100
+        )
+        # When approval was first requested doesn't change.
+        assert extended.approval_requested_at == asked.approval_requested_at
+        assert (extended.status, extended.approval_status) == (
+            "waiting_for_approval",
+            "pending",
+        )
+        assert (early, late) == ([], [run_id])
+        assert run.status == "expired"
+
+    asyncio.run(scenario())
+
+
+def test_more_time_can_be_asked_for_repeatedly_and_the_run_still_decided() -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        runs, _, _ = approval_manager(clock)
+        await runs.start()
+        try:
+            run_id = await paused(runs)
+            for _ in range(12):
+                clock.advance(590)
+                await runs.extend_approval(run_id)
+                assert await runs.expire_approvals() == []
+            await runs.resolve_approval(run_id, "approve")
+            done = await run_to_end(runs, run_id)
+        finally:
+            await runs.stop()
+
+        assert (done.status, done.approval_status) == ("completed", "approved")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("swept", [True, False], ids=["swept", "not-yet-swept"])
+def test_more_time_cannot_revive_an_expired_review(swept: bool) -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        runs, _, _ = approval_manager(clock)
+        await runs.start()
+        try:
+            run_id = await paused(runs)
+            clock.advance(600)
+            if swept:
+                await runs.expire_approvals()
+
+            with pytest.raises(ApprovalExpiredError):
+                await runs.extend_approval(run_id)
+            run = runs.get(run_id)
+            checkpoint = await has_checkpoint(runs, run_id)
+        finally:
+            await runs.stop()
+
+        assert (run.status, run.approval_status) == ("expired", "expired")
+        assert not checkpoint
+
+    asyncio.run(scenario())
+
+
+def test_more_time_needs_a_run_that_is_waiting() -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        runs, _, _ = approval_manager(clock)
+        await runs.start()
+        try:
+            rejected = await paused(runs)
+            await runs.resolve_approval(rejected, "reject")
+            with pytest.raises(ApprovalConflictError):
+                await runs.extend_approval(rejected)
+            with pytest.raises(RunNotFoundError):
+                await runs.extend_approval("no-such-run")
+            waiting = await paused(runs)
+        finally:
+            await runs.stop()
+
+        with pytest.raises(RunManagerStoppedError):
+            await runs.extend_approval(waiting)
+
+    asyncio.run(scenario())
+
+
+def test_expired_runs_are_forgotten_like_finished_ones() -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        runs, _, _ = approval_manager(clock, max_retained_runs=1)
+        await runs.start()
+        try:
+            run_id = await paused(runs)
+            clock.advance(600)
+            await runs.expire_approvals()
+            newer = runs.submit("Reverse a string.", "python").run_id
+        finally:
+            await runs.stop()
+
+        assert runs.get(run_id) is None
+        assert runs.get(newer) is not None
 
     asyncio.run(scenario())
 
@@ -1021,10 +1141,10 @@ def test_approval_and_expiry_racing_have_exactly_one_outcome(sweep_first: bool) 
         swept, approval = results if sweep_first else results[::-1]
         assert isinstance(approval, ApprovalExpiredError)
         assert swept == ([run_id] if sweep_first else [])
-        assert (run.status, run.approval_status, run.error.code) == (
-            "failed",
+        assert (run.status, run.approval_status, run.error) == (
             "expired",
-            "approval_expired",
+            "expired",
+            None,
         )
         assert len(llm.calls) == calls
         assert not checkpoint
