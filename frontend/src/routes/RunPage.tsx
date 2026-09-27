@@ -12,10 +12,9 @@ import { StatusBadge } from "@/components/run/StatusBadge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
-import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery"
 import { useRun } from "@/hooks/useRun"
 import { describeError, LANGUAGE_LABELS, STAGE_ACTIVITY, STATUS_LABELS } from "@/lib/labels"
-import { pageState, showApprovalControls } from "@/lib/run-view"
+import { pageState } from "@/lib/run-view"
 import { cn } from "@/lib/utils"
 
 /** One short sentence for the page title and the polite live region. */
@@ -88,7 +87,6 @@ function CenteredMessage({ title, children }: { title: string; children: ReactNo
 }
 
 function Workspace({ run, connectionError }: { run: Run; connectionError: ApiError | null }) {
-  const isDesktop = useMediaQuery(DESKTOP_QUERY)
   const [tab, setTab] = useState<ArtifactTab>("solution")
   const [verificationOpen, setVerificationOpen] = useState(false)
   const [scrollToVerification, setScrollToVerification] = useState(0)
@@ -104,9 +102,6 @@ function Workspace({ run, connectionError }: { run: Run; connectionError: ApiErr
     setScrollToVerification((count) => count + 1)
   }
 
-  // Below the desktop breakpoint the approval actions sit in a fixed bar; keep content clear of it.
-  const reserveActionBar = showApprovalControls(run) && !isDesktop
-
   return (
     <div className="mx-auto max-w-6xl px-4 sm:px-6">
       <h1 className="sr-only">AstraAi run: {run.task}</h1>
@@ -120,12 +115,8 @@ function Workspace({ run, connectionError }: { run: Run; connectionError: ApiErr
           <AlertDescription>{connectionError.detail} Showing the last known state.</AlertDescription>
         </Alert>
       )}
-      <div
-        className={cn(
-          "grid gap-6 py-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start lg:gap-8",
-          reserveActionBar && "pb-40",
-        )}
-      >
+      {/* The mobile approval bar publishes its height while shown (0 otherwise); keep content clear of it. */}
+      <div className="grid gap-6 pt-6 pb-[calc(1.5rem+var(--approval-bar-height,0px))] lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start lg:gap-8">
         {/* Content first in the document: on narrow screens the solution comes before the decision. */}
         <main className="min-w-0">
           <ArtifactPanel

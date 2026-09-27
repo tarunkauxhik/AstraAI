@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { Check, Loader2, ShieldCheck } from "lucide-react"
 
@@ -40,6 +40,23 @@ export function ApprovalPanel({ run, onShowDetails }: ApprovalPanelProps) {
   const isDesktop = useMediaQuery(DESKTOP_QUERY)
   const [confirmReject, setConfirmReject] = useState(false)
   const [expiryReached, setExpiryReached] = useState(false)
+  const bar = useRef<HTMLDivElement>(null)
+
+  // The fixed bar overlays the page bottom: publish its rendered height (safe area included)
+  // so the page reserves exactly that much room.
+  useEffect(() => {
+    const element = bar.current
+    if (!element || typeof ResizeObserver === "undefined") return
+    const root = document.documentElement
+    const observer = new ResizeObserver(() =>
+      root.style.setProperty("--approval-bar-height", `${element.offsetHeight}px`),
+    )
+    observer.observe(element)
+    return () => {
+      observer.disconnect()
+      root.style.removeProperty("--approval-bar-height")
+    }
+  }, [isDesktop])
 
   // Zero on the countdown only means "check with the server"; the run stays as reported.
   const handleExpiryReached = useCallback(() => {
@@ -170,6 +187,7 @@ export function ApprovalPanel({ run, onShowDetails }: ApprovalPanelProps) {
 
       {!isDesktop && (
         <div
+          ref={bar}
           role="region"
           aria-label="Approval actions"
           className="fixed inset-x-0 bottom-0 z-30 space-y-2 border-t bg-background/95 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur"

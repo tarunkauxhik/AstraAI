@@ -58,8 +58,25 @@ function Heading({ children }: { children: ReactNode }) {
   return <h3 className="text-sm font-semibold">{children}</h3>
 }
 
-/** Inline `code` spans from the model's plain-text notes, rendered as text only. */
-function InlineCode({ text }: { text: string }) {
+/** `**strong**` and `*emphasis*`; a lone `*` with a space beside it (as in `a * b`) stays literal. */
+const EMPHASIS = /(\*\*[^*]+\*\*|\*[^\s*](?:[^*]*[^\s*])?\*)/
+
+function Emphasis({ text }: { text: string }) {
+  return text.split(EMPHASIS).map((part, index) =>
+    index % 2 === 0 ? (
+      part
+    ) : part.startsWith("**") ? (
+      <strong key={index} className="font-semibold text-foreground">
+        {part.slice(2, -2)}
+      </strong>
+    ) : (
+      <em key={index}>{part.slice(1, -1)}</em>
+    ),
+  )
+}
+
+/** The model's plain-text notes: `code` spans (kept literal) and emphasis, rendered as text only. */
+function InlineText({ text }: { text: string }) {
   return (
     <>
       {text.split(/(`[^`]+`)/).map((part, index) =>
@@ -68,7 +85,7 @@ function InlineCode({ text }: { text: string }) {
             {part.slice(1, -1)}
           </code>
         ) : (
-          part
+          <Emphasis key={index} text={part} />
         ),
       )}
     </>
@@ -93,7 +110,10 @@ function noteBlocks(text: string): ({ kind: "p"; text: string } | { kind: "ul"; 
   return blocks
 }
 
-/** The model's explanation: readable, clamped to about three lines until expanded. */
+/**
+ * The model's explanation: readable, clamped to three whole lines until expanded. A line clamp
+ * (not a fixed height) cuts between lines, so block spacing can never slice a line in half.
+ */
 function Approach({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false)
   const [overflowing, setOverflowing] = useState(false)
@@ -110,19 +130,19 @@ function Approach({ text }: { text: string }) {
       <div
         ref={body}
         className={
-          "space-y-2 text-sm leading-6 text-muted-foreground " + (expanded ? "" : "max-h-18 overflow-hidden")
+          "space-y-2 text-sm leading-6 text-muted-foreground " + (expanded ? "" : "line-clamp-3")
         }
       >
         {noteBlocks(text).map((block, index) =>
           block.kind === "p" ? (
             <p key={index}>
-              <InlineCode text={block.text} />
+              <InlineText text={block.text} />
             </p>
           ) : (
             <ul key={index} className="list-disc space-y-1 pl-5">
               {block.items.map((item, itemIndex) => (
                 <li key={itemIndex}>
-                  <InlineCode text={item} />
+                  <InlineText text={item} />
                 </li>
               ))}
             </ul>

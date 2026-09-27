@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, within } from "@testing-library/react"
+import { cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { createMemoryRouter, RouterProvider } from "react-router"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import type { Run } from "@/api/types"
 import { RunPage } from "@/routes/RunPage"
@@ -74,6 +74,32 @@ describe("run page", () => {
     expect(screen.getAllByRole("timer")).toHaveLength(1)
     expect(screen.getAllByRole("button", { name: "Approve this solution" })).toHaveLength(1)
     expect(within(screen.getByRole("region", { name: "Approval actions" })).getByRole("timer")).toBeTruthy()
+  })
+
+  it("reserves the phone approval bar's measured height, and releases it when the bar goes", async () => {
+    setViewport("mobile")
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        callback: () => void
+        constructor(callback: () => void) {
+          this.callback = callback
+        }
+        observe() {
+          this.callback()
+        }
+        disconnect() {}
+      },
+    )
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(89)
+    await renderRun(waiting)
+
+    const root = document.documentElement
+    expect(root.style.getPropertyValue("--approval-bar-height")).toBe("89px")
+    cleanup()
+    expect(root.style.getPropertyValue("--approval-bar-height")).toBe("")
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it("keeps the approval decision in the panel on desktop", async () => {

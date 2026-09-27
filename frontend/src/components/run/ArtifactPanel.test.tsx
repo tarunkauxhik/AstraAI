@@ -2,7 +2,7 @@
 import { useState } from "react"
 import { render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import type { Run } from "@/api/types"
 import { ArtifactPanel, type ArtifactTab } from "@/components/run/ArtifactPanel"
@@ -24,6 +24,10 @@ function Harness({ run, initialTab = "solution" }: { run: Run; initialTab?: Arti
   return (
     <ArtifactPanel run={run} tab={tab} onTabChange={setTab} verificationOpen={open} onVerificationOpenChange={setOpen} />
   )
+}
+
+function withExplanation(explanation: string): Run {
+  return { ...waitingRun, generated_code: { ...waitingRun.generated_code!, explanation } }
 }
 
 describe("tabs", () => {
@@ -57,6 +61,51 @@ describe("solution", () => {
     const items = screen.getAllByRole("listitem").map((item) => item.textContent)
     expect(items).toEqual(["Sort by start.", "Merge overlapping intervals."])
     expect(screen.getByText("start").tagName).toBe("CODE")
+  })
+
+  it("renders markdown emphasis instead of showing the asterisks", () => {
+    const run = withExplanation(
+      "Standard merge:\n1. **Sort**: by `start`.\n2. *Sweep* once; cost is O(n * m).\nAccepts `**kwargs`.",
+    )
+    render(<Harness run={run} />)
+
+    const approach = screen.getByRole("heading", { name: "Approach" }).parentElement!
+    expect(screen.getByText("Sort").tagName).toBe("STRONG")
+    expect(screen.getByText("Sweep").tagName).toBe("EM")
+    // Asterisks survive only where they are literal: spaced arithmetic and code spans.
+    expect(approach.textContent).toContain("1. Sort: by start.")
+    expect(approach.textContent).toContain("O(n * m)")
+    expect(screen.getByText("**kwargs").tagName).toBe("CODE")
+    expect(approach.textContent?.replace("O(n * m)", "").replace("**kwargs", "")).not.toContain("*")
+  })
+
+  it("clamps a long note at whole lines, never at a fixed height, until expanded", async () => {
+    // jsdom has no layout: report an overflowing note so the collapsed state is exercised.
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(200)
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(72)
+    render(<Harness run={withExplanation(`Intro paragraph.\n- ${"A long bullet. ".repeat(20)}\nLast line.`)} />)
+
+    const body = screen.getByText("Intro paragraph.").parentElement!
+    expect(body.className).toContain("line-clamp-3")
+    expect(body.className).not.toMatch(/max-h-/)
+    // Clamped visually only: the whole note stays in the document for assistive tech.
+    expect(body.textContent).toContain("Last line.")
+
+    const toggle = screen.getByRole("button", { name: "Show more" })
+    expect(toggle.getAttribute("aria-expanded")).toBe("false")
+    await userEvent.click(toggle)
+    expect(body.className).not.toContain("line-clamp")
+    expect(screen.getByRole("button", { name: "Show less" }).getAttribute("aria-expanded")).toBe("true")
+    vi.restoreAllMocks()
+  })
+
+  it("renders a short plain-text note unchanged, with no toggle", () => {
+    render(<Harness run={withExplanation("Reverse the string with slicing.")} />)
+
+    const paragraph = screen.getByText("Reverse the string with slicing.")
+    expect(paragraph.tagName).toBe("P")
+    expect(paragraph.childElementCount).toBe(0)
+    expect(screen.queryByRole("button", { name: /Show (more|less)/ })).toBeNull()
   })
 
   it("shows a quiet placeholder while the solution is being produced", () => {
