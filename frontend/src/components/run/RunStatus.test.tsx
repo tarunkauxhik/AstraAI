@@ -114,8 +114,12 @@ describe("review", () => {
     const { onViewTests } = renderStatus(review)
 
     expect(heading().textContent).toBe("Ready for review")
-    expect(screen.getByText("All checks passed")).toBeTruthy()
-    expect(screen.getByText("2 of 2 tests passed · AI review found no issues")).toBeTruthy()
+    // Execution evidence is the headline; the model's own assessment sits under it, smaller.
+    const tests = screen.getByText("2 of 2 tests passed")
+    const aiReview = screen.getByText("AI review found no issues")
+    expect(tests.className).toContain("text-success")
+    expect(aiReview.className).toContain("text-xs")
+    expect(tests.compareDocumentPosition(aiReview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(screen.getByText(/AstraAi wrote these tests — check that they match what you meant/)).toBeTruthy()
     expect(screen.getByText("Accepting marks this run complete. Nothing is published or deployed.")).toBeTruthy()
     expect(document.body.textContent).not.toMatch(/Verified by AstraAi|Why this was accepted|Approve/)
@@ -126,7 +130,7 @@ describe("review", () => {
 
   it("mentions fixes that were needed to get there", () => {
     renderStatus({ ...review, revision_count: 1 })
-    expect(screen.getByText("2 of 2 tests passed after 1 fix · AI review found no issues")).toBeTruthy()
+    expect(screen.getByText("2 of 2 tests passed after 1 fix")).toBeTruthy()
   })
 
   it("sends Accept without marking anything locally", async () => {

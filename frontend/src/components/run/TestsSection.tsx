@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { Check, X } from "lucide-react"
 
 import type { GeneratedTestCase, Requirements, Run } from "@/api/types"
@@ -7,41 +8,71 @@ import { InlineText } from "@/components/run/InlineText"
 import { SectionHeading, SectionSkeleton } from "@/components/run/Section"
 import { FILE_NAMES, LANGUAGE_LABELS } from "@/lib/labels"
 import { testReport, type CaseEvidence } from "@/lib/run-view"
+import { cn, TOUCH_TARGET } from "@/lib/utils"
 
 /** A literal from the model, shown exactly; long ones wrap and stop at a few lines. */
 function Value({ children }: { children: string }) {
   // An empty value is shown as such, so a row never looks like something is missing.
   if (children === "") return <span className="font-sans text-muted-foreground/70 italic">(empty)</span>
-  return <span className="line-clamp-4 break-all whitespace-pre-wrap">{children}</span>
+  return <span className="line-clamp-3 break-all whitespace-pre-wrap">{children}</span>
+}
+
+/**
+ * Secondary text kept to a line or two so rows stay compact. When it doesn't fit, the text
+ * itself becomes a button that shows the rest; nothing is removed from the page.
+ */
+function Truncated({ children, className }: { children: ReactNode; className?: string }) {
+  const [open, setOpen] = useState(false)
+  const [overflowing, setOverflowing] = useState(false)
+  const body = useRef<HTMLSpanElement>(null)
+
+  useLayoutEffect(() => {
+    const element = body.current
+    if (element && !open) setOverflowing(element.scrollHeight > element.clientHeight + 1)
+  }, [children, open])
+
+  const text = (
+    <span ref={body} className={cn("block", !open && "line-clamp-1 sm:line-clamp-2")}>
+      {children}
+    </span>
+  )
+  if (!overflowing && !open) return <div className={className}>{text}</div>
+  return (
+    <button
+      type="button"
+      onClick={() => setOpen((value) => !value)}
+      aria-expanded={open}
+      className={cn(TOUCH_TARGET, "block w-full rounded-sm text-left hover:text-foreground", className)}
+    >
+      {text}
+    </button>
+  )
 }
 
 function TestRow({ testCase, evidence }: { testCase: GeneratedTestCase; evidence?: CaseEvidence }) {
   const status = evidence?.status ?? null
+  const generated = testCase.input_generator.trim()
   return (
-    <li className="grid grid-cols-[1rem_minmax(0,1fr)] gap-x-2.5 py-2.5">
+    <li className="grid grid-cols-[1rem_minmax(0,1fr)] gap-x-2.5 py-2">
       <span className="flex h-5 items-center" aria-hidden="true">
         {status === "passed" && <Check className="size-3.5 text-muted-foreground" />}
         {status === "failed" && <X className="size-3.5 text-destructive" />}
       </span>
-      <div className="min-w-0 space-y-1">
-        <p className="text-sm leading-5">
-          <span className="font-mono text-[13px]">{testCase.name}</span>
+      <div className="min-w-0 space-y-0.5">
+        <p className="font-mono text-[13px] leading-5 break-all">
+          {testCase.name}
           {status && <span className="sr-only"> {status}</span>}
-          {testCase.description && (
-            <span className="text-muted-foreground">
-              {" — "}
-              <InlineText text={testCase.description} />
+        </p>
+        {/* The evidence: what goes in and what must come out. */}
+        <p className="flex flex-wrap items-baseline gap-x-2 font-mono text-xs leading-5 text-muted-foreground">
+          {(testCase.input || !generated) && <Value>{testCase.input}</Value>}
+          {generated && (
+            <span className="font-sans text-muted-foreground/80 italic">
+              {testCase.input ? "+ generated input" : "generated input"}
             </span>
           )}
-        </p>
-        <p className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 font-mono text-xs leading-5 text-muted-foreground sm:flex sm:flex-wrap sm:items-baseline">
-          <span className="sm:hidden">in</span>
-          <Value>{testCase.input || `generated: ${testCase.input_generator}`}</Value>
-          <span className="sm:hidden">out</span>
           <span className="flex min-w-0 gap-2">
-            <span className="max-sm:hidden" aria-hidden="true">
-              →
-            </span>
+            <span aria-hidden="true">→</span>
             <span className="sr-only">expected</span>
             <Value>{testCase.expected_output}</Value>
           </span>
@@ -51,6 +82,18 @@ function TestRow({ testCase, evidence }: { testCase: GeneratedTestCase; evidence
             <span>got</span>
             <Value>{evidence.actual}</Value>
           </p>
+        )}
+        {/* The model's recipe for inputs too large to write out: the complete definition. */}
+        {generated && (
+          <Truncated className="font-mono text-xs leading-5 text-muted-foreground">
+            <span className="font-sans">generated: </span>
+            {generated}
+          </Truncated>
+        )}
+        {testCase.description && (
+          <Truncated className="text-xs leading-5 text-muted-foreground/80">
+            <InlineText text={testCase.description} />
+          </Truncated>
         )}
       </div>
     </li>

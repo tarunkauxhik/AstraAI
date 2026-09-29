@@ -144,10 +144,10 @@ function Review({ run, onDecided, onViewTests }: ReviewProps) {
   const locked = approval.isPending || approval.isSuccess || expiryReached
   const result = run.execution_result
   const fixes = run.revision_count > 0 ? ` after ${formatCount(run.revision_count, "fix", "fixes")}` : ""
-  const facts = [
-    result ? `${testRunSummary(result, run.generated_tests?.cases.length ?? null)}${fixes}` : null,
-    "AI review found no issues",
-  ].filter(Boolean)
+  // Execution evidence leads; the model's own assessment is secondary to it.
+  const tested = result
+    ? `${testRunSummary(result, run.generated_tests?.cases.length ?? null)}${fixes}`
+    : "All checks passed"
   const pending = approval.isPending ? approval.variables : null
 
   function decide(decision: "approve" | "reject") {
@@ -161,9 +161,9 @@ function Review({ run, onDecided, onViewTests }: ReviewProps) {
       <div>
         <p className="flex items-center gap-1.5 font-medium text-success">
           <Check className="size-4" aria-hidden="true" />
-          All checks passed
+          {tested}
         </p>
-        <p className="mt-0.5 text-sm text-muted-foreground">{facts.join(" · ")}</p>
+        <p className="mt-0.5 pl-5.5 text-xs text-muted-foreground">AI review found no issues</p>
       </div>
       <p className="text-sm text-muted-foreground">
         AstraAi wrote these tests — check that they match what you meant.{" "}

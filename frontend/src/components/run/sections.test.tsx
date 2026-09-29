@@ -136,6 +136,37 @@ describe("tests", () => {
     expect(rows().map((row) => row.textContent?.includes("passed"))).toEqual([true, true])
   })
 
+  it("never hides a generated input, and keeps its full recipe inspectable", async () => {
+    const recipe = "Build nums as [1] * 50000 + [2] * 25000 + [3] * 25000 (100,000 integers)."
+    const both = { ...waitingRun.generated_tests!.cases[0], name: "large_k_one", input: "k = 1", input_generator: recipe }
+    const onlyGenerated = { ...both, name: "large_only", input: "" }
+    const run: Run = { ...waitingRun, generated_tests: { ...waitingRun.generated_tests!, cases: [both, onlyGenerated] } }
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(60)
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(20)
+    render(<TestsSection run={run} />)
+
+    const [withLiteral, generatedOnly] = rows()
+    // The literal part alone must not read as the whole input.
+    expect(withLiteral.textContent).toContain("k = 1")
+    expect(withLiteral.textContent).toContain("+ generated input")
+    expect(generatedOnly.textContent).toContain("generated input")
+    expect(generatedOnly.textContent).not.toContain("(empty)")
+    // The complete recipe is on the page, clamped to a line until asked for.
+    const recipeLine = within(withLiteral).getByText(recipe).closest("button")!
+    expect(recipeLine.getAttribute("aria-expanded")).toBe("false")
+    await userEvent.click(recipeLine)
+    expect(recipeLine.getAttribute("aria-expanded")).toBe("true")
+    vi.restoreAllMocks()
+  })
+
+  it("puts the evidence before the description, which is secondary and compact", () => {
+    render(<TestsSection run={waitingRun} />)
+    const [first] = rows()
+    const text = first.textContent ?? ""
+    expect(text.indexOf('s = "abc"')).toBeLessThan(text.indexOf("Reverses a typical word."))
+    expect(within(first).getByText("Reverses a typical word.").closest("[class*='line-clamp-1']")).not.toBeNull()
+  })
+
   it("drops category badges that repeat what each case says", () => {
     render(<TestsSection run={waitingRun} />)
     expect(screen.queryByText("Empty or small")).toBeNull()
