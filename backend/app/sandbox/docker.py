@@ -24,6 +24,7 @@ INSPECT_FORMAT = (
 )
 # Docker's zero time: the container's process was never started.
 NEVER_STARTED = "0001-01-01T00:00:00Z"
+CONTAINER_PREFIX = "astraai-sandbox-"
 
 
 @dataclass(frozen=True)
@@ -171,7 +172,7 @@ class DockerSandbox:
     async def _execute_in_container(
         self, spec: LanguageSpec, generated_code: GeneratedCode
     ) -> ExecutionResult:
-        name = f"astraai-sandbox-{uuid4().hex[:12]}"
+        name = f"{CONTAINER_PREFIX}{uuid4().hex[:12]}"
         archive = build_archive(spec, generated_code)
         started = time.perf_counter()
         try:
@@ -199,6 +200,31 @@ class DockerSandbox:
         finally:
             # Shielded: a second cancellation must not abort removing the container.
             await asyncio.shield(self._cleanup(name))
+
+    async def remove_leftovers(self) -> None:
+        """Remove sandbox containers left behind by a process that ended without cleanup.
+
+        Call once at startup, before any run executes. Their executions are never continued:
+        the process that enforced their timeout and waited for their output is gone.
+
+        Only names starting with CONTAINER_PREFIX match (Docker matches the name with its
+        leading slash, unanchored unless told otherwise). One AstraAi process owns that
+        namespace on a Docker daemon: a second instance on the same daemon would lose its
+        running sandboxes whenever this one starts.
+        """
+        listed = await self._docker(
+            "ps", "--all", "--quiet", "--filter", f"name=^/{CONTAINER_PREFIX}"
+        )
+        if listed.code != 0:
+            logger.warning("could not list leftover sandbox containers")
+            return
+        leftovers = listed.stdout.split()
+        if not leftovers:
+            return
+        logger.warning("removing %d leftover sandbox container(s)", len(leftovers))
+        removed = await self._docker("rm", "--force", "--volumes", *leftovers)
+        if removed.code != 0:
+            logger.warning("leftover sandbox containers were not all removed")
 
     async def _docker(self, *args: str) -> Completed:
         try:

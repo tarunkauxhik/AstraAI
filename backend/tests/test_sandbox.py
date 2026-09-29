@@ -443,3 +443,33 @@ def test_inspect_output_is_parsed() -> None:
         False,
         False,
     )
+
+
+def remove_leftovers(cli: FakeDockerCli, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.sandbox.docker.asyncio.create_subprocess_exec", cli)
+    asyncio.run(DockerSandbox(Settings()).remove_leftovers())
+
+
+def test_leftover_containers_from_an_earlier_process_are_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = FakeDockerCli(listed=b"3f2a9c1b0d4e\n7b1c2d3e4f5a\n")
+
+    remove_leftovers(cli, monkeypatch)
+
+    assert cli.ran("ps") == [
+        ["docker", "ps", "--all", "--quiet", "--filter", "name=^/astraai-sandbox-"]
+    ]
+    assert cli.ran("rm") == [
+        ["docker", "rm", "--force", "--volumes", "3f2a9c1b0d4e", "7b1c2d3e4f5a"]
+    ]
+    assert cli.ran("start") == []  # Removed, never continued.
+
+
+@pytest.mark.parametrize("cli", [FakeDockerCli(), FakeDockerCli(failing=("ps",))])
+def test_nothing_is_removed_without_leftovers_or_a_listing(
+    monkeypatch: pytest.MonkeyPatch, cli: FakeDockerCli
+) -> None:
+    remove_leftovers(cli, monkeypatch)
+
+    assert cli.ran("rm") == []

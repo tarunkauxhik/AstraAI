@@ -10,11 +10,11 @@ import subprocess
 import pytest
 
 from app.config import Settings
-from app.graph import build_checkpointer, build_graph
 from app.runs import RunManager
 from app.sandbox.docker import DockerSandbox
 from app.state import ExecutionResult, GeneratedCode, GraphContext
 from tests.fake_llm import WORKFLOW_REPLIES, fake_llm
+from tests.fake_runs import storage, stored
 
 pytestmark = [
     pytest.mark.docker,
@@ -321,12 +321,14 @@ def looping_run_manager(run_timeout_seconds: float) -> RunManager:
         **WORKFLOW_REPLIES,
         "GeneratedCode": INFINITE_LOOP_CODE.model_dump_json(),
     }
+    graph, store = storage()
     return RunManager(
-        build_graph(build_checkpointer()),
+        graph,
         GraphContext(
             llm=fake_llm(replies),
             sandbox=DockerSandbox(Settings(sandbox_timeout_seconds=120)),
         ),
+        store,
         max_active_runs=1,
         max_queued_runs=10,
         max_retained_runs=100,
@@ -391,10 +393,36 @@ def test_shutdown_removes_the_real_container() -> None:
 
         await runs.stop()
 
-        return runs.get(run_id).error.code, running_containers
+        return stored(run_id).error.code, running_containers
 
     code, running_containers = asyncio.run(scenario())
 
     assert code == "shutdown"
     assert len(running_containers) == len(before) + 1
     assert sandbox_containers() == before
+
+
+def test_startup_removes_only_real_leftover_containers() -> None:
+    # What a crashed process leaves behind: a sandbox container still running.
+    leftover = "astraai-sandbox-leftover0"
+    # Not ours: the name merely contains the prefix.
+    lookalike = "other-astraai-sandbox-0"
+    for name in (leftover, lookalike):
+        subprocess.run(
+            ["docker", "run", "--detach", "--name", name]
+            + [Settings().sandbox_python_image, "sleep", "300"],
+            check=True,
+            capture_output=True,
+        )
+    try:
+        asyncio.run(DockerSandbox(Settings()).remove_leftovers())
+
+        remaining = sandbox_containers()
+        assert leftover not in remaining
+        assert lookalike in remaining
+    finally:
+        subprocess.run(
+            ["docker", "rm", "--force", leftover, lookalike],
+            capture_output=True,
+            check=False,
+        )

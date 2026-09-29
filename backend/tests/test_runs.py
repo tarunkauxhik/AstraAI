@@ -4,9 +4,10 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from langgraph.types import Command
 
 from app.config import Settings
-from app.graph import build_checkpointer, build_graph
+from app.graph import build_graph
 from app.llm import LLMClient, LLMError, LLMTimeoutError
 from app.repair import MAX_REVISIONS
 from app.runs import (
@@ -43,7 +44,7 @@ from tests.fake_llm import (
     fake_llm,
     timeout,
 )
-from tests.fake_runs import Clock, Gates, hold_forever
+from tests.fake_runs import Clock, Gates, hold_forever, storage, stored
 from tests.fake_sandbox import (
     FAILED,
     PASSED,
@@ -63,9 +64,12 @@ def manager(
     run_timeout_seconds: float = 300,
     **options: Any,
 ) -> RunManager:
+    """A manager on real SQLite in the test's data dir; a second one there is a restart."""
+    graph, store = storage()
     return RunManager(
-        build_graph(build_checkpointer()),
+        graph,
         GraphContext(llm=llm, sandbox=sandbox),
+        store,
         max_active_runs=1,
         max_queued_runs=max_queued_runs,
         max_retained_runs=max_retained_runs,
@@ -75,7 +79,8 @@ def manager(
     )
 
 
-async def wait_until(condition: Callable[[], bool], timeout: float = 2.0) -> None:
+async def wait_until(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    # Generous: runs use real SQLite files, and a cold first run can be slow on Windows.
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while not condition():
@@ -228,12 +233,12 @@ def test_a_run_never_executes_twice() -> None:
         try:
             await run_to_end(runs, run_id)
             await asyncio.sleep(0.05)
+            assert runs.enqueue(run_id) is False
+            assert runs.enqueue("unknown") is False
         finally:
             await runs.stop()
 
         assert len(sandbox.calls) == 1
-        assert runs.enqueue(run_id) is False
-        assert runs.enqueue("unknown") is False
 
     asyncio.run(scenario())
 
@@ -438,7 +443,7 @@ def test_shutdown_cancels_the_active_run_and_removes_its_container(
         assert len(cli.ran("rm")) == 1
         with pytest.raises(RunManagerStoppedError):
             runs.submit("late", "python")
-        return runs.get(active), runs.get(waiting)
+        return stored(active), stored(waiting)
 
     active, waiting = asyncio.run(scenario())
 
@@ -447,11 +452,8 @@ def test_shutdown_cancels_the_active_run_and_removes_its_container(
         "shutdown",
         "executing",
     )
-    assert (waiting.status, waiting.error.code, waiting.error.stage) == (
-        "failed",
-        "shutdown",
-        "queued",
-    )
+    # A run that never started is kept for the next process, not failed.
+    assert (waiting.status, waiting.stage, waiting.error) == ("queued", "queued", None)
     assert len(cli.ran("create")) == 1  # The waiting run never started a container.
     assert cli._started.killed
 
@@ -793,8 +795,8 @@ def test_a_resume_that_overruns_its_own_timeout_fails(
     assert (run.status, run.error.code) == ("failed", "run_timeout")
 
 
-def test_shutdown_fails_runs_waiting_for_approval() -> None:
-    async def scenario() -> Run:
+def test_shutdown_keeps_runs_waiting_for_approval() -> None:
+    async def scenario() -> None:
         runs = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
         await runs.start()
         run_id = runs.submit("Reverse a string.", "python").run_id
@@ -802,16 +804,21 @@ def test_shutdown_fails_runs_waiting_for_approval() -> None:
 
         await runs.stop()
 
-        assert (await runs._graph.aget_state(thread(run_id))).values == {}
-        return runs.get(run_id)
+        # Waiting is not work in progress: the run and its paused thread outlive the process.
+        run = stored(run_id)
+        assert (run.status, run.approval_status, run.error) == (
+            "waiting_for_approval",
+            "pending",
+            None,
+        )
+        restarted = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        await restarted.start()
+        try:
+            assert await has_checkpoint(restarted, run_id)
+        finally:
+            await restarted.stop()
 
-    run = asyncio.run(scenario())
-
-    assert (run.status, run.error.code, run.error.stage) == (
-        "failed",
-        "shutdown",
-        "waiting_for_approval",
-    )
+    asyncio.run(scenario())
 
 
 # Approval timeout. The sweeper interval is huge unless a test says otherwise, so each test
@@ -1077,11 +1084,10 @@ def test_expired_runs_are_forgotten_like_finished_ones() -> None:
             clock.advance(600)
             await runs.expire_approvals()
             newer = runs.submit("Reverse a string.", "python").run_id
+            assert runs.get(run_id) is None
+            assert runs.get(newer) is not None
         finally:
             await runs.stop()
-
-        assert runs.get(run_id) is None
-        assert runs.get(newer) is not None
 
     asyncio.run(scenario())
 
@@ -1174,7 +1180,7 @@ def test_approval_first_makes_a_racing_sweep_a_no_op() -> None:
     asyncio.run(scenario())
 
 
-def test_shutdown_wins_over_an_elapsed_approval_timeout() -> None:
+def test_shutdown_leaves_an_elapsed_approval_to_the_next_process() -> None:
     async def scenario() -> None:
         clock = Clock()
         runs, _, _ = approval_manager(clock)
@@ -1183,15 +1189,27 @@ def test_shutdown_wins_over_an_elapsed_approval_timeout() -> None:
         clock.advance(10_000)
 
         await runs.stop()
-        swept = await runs.expire_approvals()
-        run = runs.get(run_id)
 
-        assert swept == []
-        assert (run.status, run.error.code) == ("failed", "shutdown")
-        assert run.approval_status == "pending"
-        assert not await has_checkpoint(runs, run_id)
+        # A stopping process decides nothing, not even expiry.
+        assert await runs.expire_approvals() == []
         with pytest.raises(RunManagerStoppedError):
             await runs.resolve_approval(run_id, "approve")
+        assert stored(run_id).status == "waiting_for_approval"
+
+        restarted, _, _ = approval_manager(clock)
+        await restarted.start()
+        try:
+            with pytest.raises(ApprovalExpiredError):
+                await restarted.resolve_approval(run_id, "approve")
+            run = restarted.get(run_id)
+            assert (run.status, run.approval_status, run.error) == (
+                "expired",
+                "expired",
+                None,
+            )
+            assert not await has_checkpoint(restarted, run_id)
+        finally:
+            await restarted.stop()
 
     asyncio.run(scenario())
 
@@ -1363,8 +1381,8 @@ def test_a_resumed_run_waiting_in_the_queue_still_reads_resuming() -> None:
     asyncio.run(scenario())
 
 
-def test_shutdown_fails_a_resume_still_in_the_queue() -> None:
-    async def scenario() -> Run:
+def test_an_approved_run_still_in_the_queue_resumes_after_a_restart() -> None:
+    async def scenario() -> None:
         gates = Gates()
         runs = manager(gates.llm(), gates.sandbox(), approval_sweep_seconds=NO_SWEEP)
         await runs.start()
@@ -1377,13 +1395,539 @@ def test_shutdown_fails_a_resume_still_in_the_queue() -> None:
 
         await runs.stop()
 
-        assert not await has_checkpoint(runs, first)
-        return runs.get(first)
+        # The human's decision was recorded, so the next process carries it out.
+        assert (stored(first).stage, stored(first).approval_status) == (
+            "resuming",
+            "approved",
+        )
+        llm = ScriptedReplies(WORKFLOW_REPLIES)
+        sandbox = FakeSandbox()
+        restarted = manager(fake_llm(llm), sandbox, approval_sweep_seconds=NO_SWEEP)
+        await restarted.start()
+        try:
+            run = await run_to_end(restarted, first)
+            assert (run.status, run.approval_status, run.error) == (
+                "completed",
+                "approved",
+                None,
+            )
+            # Resumed on its checkpoint: no step was repeated.
+            assert "Requirements" not in llm.calls
+            assert sandbox.calls == []
+            # The busy run was working when the process stopped, so it stays failed.
+            assert (restarted.get(busy).status, restarted.get(busy).error.code) == (
+                "failed",
+                "shutdown",
+            )
+        finally:
+            await restarted.stop()
 
-    run = asyncio.run(scenario())
+    asyncio.run(scenario())
 
-    assert (run.status, run.error.code, run.error.stage) == (
-        "failed",
-        "shutdown",
-        "resuming",
-    )
+
+# Durability. Every manager below uses real SQLite files in the test's data dir, so a
+# second manager there is a restarted process. A "crash" starts that second manager while
+# the first is still stuck mid-step: exactly what a new process finds after a hard kill.
+ALL_STATUSES = (
+    "queued",
+    "running",
+    "waiting_for_approval",
+    "completed",
+    "failed",
+    "expired",
+)
+EVIDENCE = (
+    "requirements",
+    "generated_tests",
+    "generated_code",
+    "execution_result",
+    "critic_result",
+)
+
+
+def test_a_submitted_run_is_stored_and_executes_once_across_restarts() -> None:
+    async def scenario() -> None:
+        runs = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        submitted = runs.submit("Reverse a string.", "python")
+        await runs.stop()  # Stopped before any worker took it.
+
+        assert stored(submitted.run_id) == submitted
+        sandbox = FakeSandbox()
+        restarted = manager(fake_llm(WORKFLOW_REPLIES), sandbox)
+        await restarted.start()
+        try:
+            run = await run_to_end(restarted, submitted.run_id)
+        finally:
+            await restarted.stop()
+        assert run.status == "completed"
+        assert len(sandbox.calls) == 1
+
+        again = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        await again.start()
+        try:
+            assert again.get(submitted.run_id) == run
+            stored_ids = [r.run_id for r in again._store.with_status(*ALL_STATUSES)]
+            assert stored_ids == [submitted.run_id]
+        finally:
+            await again.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("ending", "status"),
+    [("approve", "completed"), ("reject", "failed"), ("expire", "expired")],
+)
+def test_finished_runs_and_their_evidence_survive_a_restart(
+    ending: str, status: str
+) -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        runs, _, _ = approval_manager(clock)
+        await runs.start()
+        try:
+            run_id = await paused(runs)
+            if ending == "expire":
+                clock.advance(600)
+                await runs.expire_approvals()
+            else:
+                await run_to_end(runs, run_id, ending)
+            before = runs.get(run_id)
+        finally:
+            await runs.stop()
+
+        restarted, llm, sandbox = approval_manager(clock)
+        await restarted.start()
+        try:
+            after = restarted.get(run_id)
+            assert after == before
+            assert after.status == status
+            assert all(getattr(after, field) is not None for field in EVIDENCE)
+            await asyncio.sleep(0.05)
+            assert (llm.calls, sandbox.calls) == ([], [])
+        finally:
+            await restarted.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_waiting_run_is_approved_after_a_restart_on_the_same_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        runs = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        await runs.start()
+        try:
+            run_id = await paused(runs)
+            before = runs.get(run_id)
+        finally:
+            await runs.stop()
+
+        llm = ScriptedReplies(WORKFLOW_REPLIES)
+        sandbox = FakeSandbox()
+        restarted = manager(fake_llm(llm), sandbox)
+        streams: list[tuple[Any, str]] = []
+        astream = restarted._graph.astream
+
+        def spy(graph_input: Any, config: Any, **kwargs: Any) -> Any:
+            streams.append((graph_input, config["configurable"]["thread_id"]))
+            return astream(graph_input, config, **kwargs)
+
+        monkeypatch.setattr(restarted._graph, "astream", spy)
+        await restarted.start()
+        try:
+            assert restarted.get(run_id) == before
+            decided = await restarted.resolve_approval(run_id, "approve")
+            assert decided.stage == "resuming"
+            run = await run_to_end(restarted, run_id)
+        finally:
+            await restarted.stop()
+
+        assert (run.status, run.approval_status, run.error) == (
+            "completed",
+            "approved",
+            None,
+        )
+        # One resume of the paused thread; nothing before the approval ran again.
+        [(graph_input, thread_id)] = streams
+        assert isinstance(graph_input, Command)
+        assert thread_id == run_id
+        assert (llm.calls, sandbox.calls) == ([], [])
+        for field in EVIDENCE:
+            assert getattr(run, field) == getattr(before, field)
+
+    asyncio.run(scenario())
+
+
+def test_a_crash_during_a_model_step_never_reports_completion() -> None:
+    async def scenario() -> None:
+        gates = Gates()
+        crashed = manager(gates.llm(), gates.sandbox())
+        await crashed.start()
+        gates.open("Requirements")
+        run_id = crashed.submit("Reverse a string.", "python").run_id
+        await wait_until(lambda: crashed.get(run_id).stage == "generating_tests")
+
+        llm = ScriptedReplies(WORKFLOW_REPLIES)
+        restarted = manager(fake_llm(llm), FakeSandbox())
+        await restarted.start()
+        try:
+            run = restarted.get(run_id)
+            assert (run.status, run.stage) == ("failed", "failed")
+            assert (run.error.code, run.error.stage) == ("shutdown", "generating_tests")
+            assert run.requirements is not None  # The evidence it had is kept.
+            assert not await has_checkpoint(restarted, run_id)
+            await asyncio.sleep(0.05)
+            assert llm.calls == []  # Never continued.
+        finally:
+            await restarted.stop()
+            await crashed.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_crash_during_sandbox_execution_never_claims_the_execution() -> None:
+    async def scenario() -> None:
+        gates = Gates()
+        crashed = manager(gates.llm(), gates.sandbox())
+        await crashed.start()
+        gates.open("Requirements", "GeneratedTests", "GeneratedCode")
+        run_id = crashed.submit("Reverse a string.", "python").run_id
+        await wait_until(lambda: crashed.get(run_id).stage == "executing")
+
+        sandbox = FakeSandbox()
+        restarted = manager(fake_llm(WORKFLOW_REPLIES), sandbox)
+        await restarted.start()
+        try:
+            run = restarted.get(run_id)
+            assert (run.status, run.error.code, run.error.stage) == (
+                "failed",
+                "shutdown",
+                "executing",
+            )
+            # No outcome was observed, so none is reported, and it is never re-run.
+            assert run.execution_result is None
+            assert run.approval_status is None
+            assert run.generated_code is not None
+            await asyncio.sleep(0.05)
+            assert sandbox.calls == []
+        finally:
+            await restarted.stop()
+            await crashed.stop()
+
+    asyncio.run(scenario())
+
+
+def test_approval_timing_survives_a_restart() -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        runs, _, _ = approval_manager(clock)
+        await runs.start()
+        try:
+            run_id = await paused(runs)
+            requested = runs.get(run_id)
+        finally:
+            await runs.stop()
+
+        clock.advance(300)
+        restarted, _, _ = approval_manager(clock)
+        await restarted.start()
+        try:
+            run = restarted.get(run_id)
+            assert run.approval_requested_at == requested.approval_requested_at
+            assert run.approval_expires_at == requested.approval_expires_at
+            extended = await restarted.extend_approval(run_id)
+            assert extended.approval_expires_at == clock.now + timedelta(seconds=600)
+        finally:
+            await restarted.stop()
+
+        clock.advance(600)
+        again, _, _ = approval_manager(clock)
+        await again.start()
+        try:
+            assert again.get(run_id).approval_expires_at == extended.approval_expires_at
+            with pytest.raises(ApprovalExpiredError):
+                await again.extend_approval(run_id)
+            assert again.get(run_id).status == "expired"
+        finally:
+            await again.stop()
+
+    asyncio.run(scenario())
+
+
+def test_retention_never_removes_a_waiting_run_or_its_checkpoint() -> None:
+    async def scenario() -> None:
+        runs, _, _ = approval_manager(Clock(), max_retained_runs=2)
+        await runs.start()
+        try:
+            waiting = await paused(runs)
+            for _ in range(3):
+                await runs.resolve_approval(await paused(runs), "reject")
+            runs.submit("one more", "python")
+
+            assert runs.get(waiting).status == "waiting_for_approval"
+            assert await has_checkpoint(runs, waiting)
+            assert len(runs._store.with_status(*ALL_STATUSES)) == 2
+            assert (await run_to_end(runs, waiting)).status == "completed"
+        finally:
+            await runs.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_waiting_run_whose_checkpoint_is_gone_fails_instead_of_resuming() -> None:
+    async def scenario() -> None:
+        runs = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        await runs.start()
+        try:
+            run_id = await paused(runs)
+        finally:
+            await runs.stop()
+
+        restarted = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        checkpointer = restarted._graph.checkpointer
+        await checkpointer.setup()
+        await checkpointer.adelete_thread(run_id)
+        await restarted.start()
+        try:
+            run = restarted.get(run_id)
+            assert (run.status, run.error.code, run.error.stage) == (
+                "failed",
+                "shutdown",
+                "waiting_for_approval",
+            )
+            with pytest.raises(ApprovalConflictError):
+                await restarted.resolve_approval(run_id, "approve")
+        finally:
+            await restarted.stop()
+
+    asyncio.run(scenario())
+
+
+# Crash windows around an acknowledged approval. Once POST /approval returns 202 the
+# decision is durable, and no restart or shutdown may turn it into a failure.
+
+
+def freeze_after_resume(
+    runs: RunManager, monkeypatch: pytest.MonkeyPatch
+) -> asyncio.Event:
+    """The resumed graph finishes, then the process dies before recording the outcome."""
+    finished = asyncio.Event()
+    drive = runs._drive_graph
+
+    async def frozen(run_id: str, graph_input: Any) -> Any:
+        await drive(run_id, graph_input)
+        finished.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runs, "_drive_graph", frozen)
+    return finished
+
+
+def test_a_finished_resume_whose_outcome_was_not_recorded_completes_after_a_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        crashed = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        await crashed.start()
+        run_id = await paused(crashed)
+        finished = freeze_after_resume(crashed, monkeypatch)
+        await crashed.resolve_approval(run_id, "approve")
+        await finished.wait()
+        assert stored(run_id).stage == "resuming"
+
+        llm = ScriptedReplies(WORKFLOW_REPLIES)
+        sandbox = FakeSandbox()
+        restarted = manager(fake_llm(llm), sandbox)
+        await restarted.start()
+        try:
+            run = restarted.get(run_id)
+            assert (run.status, run.approval_status, run.error) == (
+                "completed",
+                "approved",
+                None,
+            )
+            assert not await has_checkpoint(restarted, run_id)
+            await asyncio.sleep(0.05)
+            assert (llm.calls, sandbox.calls) == ([], [])
+        finally:
+            await restarted.stop()
+            await crashed.stop()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_during_a_resume_leaves_the_approval_for_the_next_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        runs = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        await runs.start()
+        run_id = await paused(runs)
+        resuming = asyncio.Event()
+
+        async def in_flight(run_id: str, graph_input: Any) -> Any:
+            resuming.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(runs, "_drive_graph", in_flight)
+        await runs.resolve_approval(run_id, "approve")
+        await resuming.wait()
+
+        await runs.stop()
+
+        run = stored(run_id)
+        assert (run.status, run.stage, run.approval_status, run.error) == (
+            "running",
+            "resuming",
+            "approved",
+            None,
+        )
+        llm = ScriptedReplies(WORKFLOW_REPLIES)
+        sandbox = FakeSandbox()
+        restarted = manager(fake_llm(llm), sandbox)
+        await restarted.start()
+        try:
+            done = await run_to_end(restarted, run_id)
+        finally:
+            await restarted.stop()
+        assert (done.status, done.approval_status) == ("completed", "approved")
+        assert (llm.calls, sandbox.calls) == ([], [])
+
+    asyncio.run(scenario())
+
+
+def test_repeated_crashes_while_resuming_complete_the_run_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        first = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        await first.start()
+        run_id = await paused(first)
+
+        # Crash 1: the approval is stored, and the process dies before resuming.
+        async def dies_first(run_id: str, graph_input: Any) -> Any:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(first, "_drive_graph", dies_first)
+        await first.resolve_approval(run_id, "approve")
+
+        # Crash 2: the next process resumes, and dies while writing the new checkpoint.
+        # (Released only at teardown, so the dead process can drain.)
+        llm = ScriptedReplies(WORKFLOW_REPLIES)
+        sandbox = FakeSandbox()
+        second = manager(fake_llm(llm), sandbox)
+        writing, release = asyncio.Event(), asyncio.Event()
+        aput = second._graph.checkpointer.aput
+
+        async def dies_writing(*args: Any, **kwargs: Any) -> Any:
+            writing.set()
+            await release.wait()
+            return await aput(*args, **kwargs)
+
+        monkeypatch.setattr(second._graph.checkpointer, "aput", dies_writing)
+        await second.start()
+        await asyncio.wait_for(writing.wait(), 5)
+
+        third = manager(fake_llm(llm), sandbox)
+        await third.start()
+        try:
+            run = await run_to_end(third, run_id)
+            assert (run.status, run.approval_status, run.error) == (
+                "completed",
+                "approved",
+                None,
+            )
+            # Neither restart repeated any work from before the approval.
+            assert (llm.calls, sandbox.calls) == ([], [])
+            stored_ids = [r.run_id for r in third._store.with_status(*ALL_STATUSES)]
+            assert stored_ids == [run_id]
+            assert not await has_checkpoint(third, run_id)
+        finally:
+            await third.stop()
+            release.set()
+            await second.stop()
+            await first.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("sweep_first", [True, False])
+def test_more_time_and_expiry_racing_have_exactly_one_outcome(
+    sweep_first: bool,
+) -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        runs, _, _ = approval_manager(clock)
+        await runs.start()
+        try:
+            run_id = await paused(runs)
+            clock.advance(600)
+            sweep = runs.expire_approvals()
+            extend = runs.extend_approval(run_id)
+            ordered = (sweep, extend) if sweep_first else (extend, sweep)
+
+            results = await asyncio.gather(*ordered, return_exceptions=True)
+            run = runs.get(run_id)
+            checkpoint = await has_checkpoint(runs, run_id)
+        finally:
+            await runs.stop()
+
+        swept, extension = results if sweep_first else results[::-1]
+        assert isinstance(extension, ApprovalExpiredError)
+        assert swept == ([run_id] if sweep_first else [])
+        assert (run.status, run.approval_status) == ("expired", "expired")
+        assert not checkpoint
+
+    asyncio.run(scenario())
+
+
+def test_a_storage_error_after_a_run_does_not_stop_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        runs = manager(fake_llm(WORKFLOW_REPLIES), FakeSandbox())
+        await runs.start()
+        try:
+            first = await paused(runs)
+            delete = runs._graph.checkpointer.adelete_thread
+            failures = [OSError("disk full")]
+
+            async def flaky(thread_id: str) -> None:
+                if failures:
+                    raise failures.pop()
+                await delete(thread_id)
+
+            monkeypatch.setattr(runs._graph.checkpointer, "adelete_thread", flaky)
+            await runs.resolve_approval(first, "approve")
+            await wait_until(lambda: runs.get(first).status == "completed")
+
+            # With one worker, the next run only gets anywhere if that worker survived.
+            assert runs.get(await paused(runs)).status == "waiting_for_approval"
+        finally:
+            await runs.stop()
+
+    asyncio.run(scenario())
+
+
+def test_both_databases_keep_committed_writes_through_power_loss() -> None:
+    async def scenario() -> None:
+        graph, store = storage()
+        checkpointer = graph.checkpointer
+        await checkpointer.setup()
+        try:
+            runs = [store._db.execute(f"PRAGMA {p}").fetchone()[0] for p in PRAGMAS]
+            checkpoints = []
+            for pragma in PRAGMAS:
+                async with checkpointer.conn.execute(f"PRAGMA {pragma}") as cursor:
+                    checkpoints.append((await cursor.fetchone())[0])
+        finally:
+            store.close()
+            await checkpointer.conn.close()
+        # WAL, with synchronous FULL (2): commits are synced, not only ordered.
+        assert runs == checkpoints == ["wal", 2]
+
+    asyncio.run(scenario())
+
+
+PRAGMAS = ("journal_mode", "synchronous")

@@ -1,17 +1,31 @@
-"""Run lifecycle: run records, a bounded queue, and in-process workers that drive the graph.
+"""Run lifecycle: durable run records, a bounded queue, and in-process workers.
 
-Everything queue-shaped lives behind RunManager, so a durable backend (a database or a
-broker) can replace it later without changing the API or the graph.
+The run store is the source of truth for what the API reports; the checkpointer only holds
+what a paused graph needs to continue. The queue is an execution mechanism, rebuilt from
+the store when the process starts.
+
+Restart semantics, applied by `start` before any worker runs:
+- queued: never started, so it is queued again, in its original order.
+- running: the process that owned the work is gone and nothing can confirm its outcome,
+  so it fails as interrupted ("shutdown"), keeping the evidence it had. Sandbox executions
+  are never continued.
+- waiting_for_approval: still waiting on its checkpoint; the approval window is unchanged.
+- approved and resuming: the approval was acknowledged, so it is carried out. The run
+  resumes on the same thread if its checkpoint is still paused for approval, or completes if
+  the resume already reached the end and only recording that was lost. Resuming only
+  replays the approval step, which has no side effects, so repeating it is safe. Without a
+  usable checkpoint it fails as interrupted.
+- completed, failed, expired: unchanged.
 """
 
 import asyncio
 import logging
-from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, computed_field
@@ -29,6 +43,9 @@ from app.state import (
     Language,
     Requirements,
 )
+
+if TYPE_CHECKING:
+    from app.store import RunStore
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +168,9 @@ class ApprovalExpiredError(ApprovalConflictError):
 SHUTDOWN_GRACE_SECONDS = 30
 RUN_TIMEOUT_MESSAGE = "The run took longer than the allowed time and was stopped."
 SHUTDOWN_MESSAGE = "The run was stopped because the service is shutting down."
+RESTART_MESSAGE = (
+    "The run was stopped because the service restarted while it was working."
+)
 REJECTED_MESSAGE = "A human rejected the verified solution."
 # How often waiting runs are checked for an expired approval request.
 APPROVAL_SWEEP_SECONDS = 60
@@ -188,12 +208,14 @@ class RunManager:
 
     Workers pull run ids from a bounded queue and drive the LangGraph workflow. Stages and
     partial results are recorded from the graph's own stream, so the nodes stay unaware.
+    One manager per process owns the store and the checkpointer, and closes them on stop.
     """
 
     def __init__(
         self,
         graph: CompiledStateGraph,
         context: GraphContext,
+        store: "RunStore",
         *,
         max_active_runs: int,
         max_queued_runs: int,
@@ -213,7 +235,7 @@ class RunManager:
         self._approval_timeout = timedelta(seconds=approval_timeout_seconds)
         self._approval_sweep_seconds = approval_sweep_seconds
         self._clock = clock
-        self._runs: OrderedDict[str, Run] = OrderedDict()
+        self._store = store
         self._enqueued: set[str] = set()
         # Approved runs queued to resume; only these may be claimed while not queued.
         self._resuming: set[str] = set()
@@ -223,32 +245,28 @@ class RunManager:
         self._stopping = False
 
     async def start(self) -> None:
-        """Start one worker per allowed active run and the approval sweeper, once."""
+        """Reconcile stored runs, then start the workers and the approval sweeper, once."""
         if self._workers:
             return
         self._stopping = False
+        await self._recover()
         self._workers = [
             asyncio.create_task(self._work()) for _ in range(self._max_active_runs)
         ]
         self._sweeper = asyncio.create_task(self._sweep_approvals())
 
     async def stop(self) -> None:
-        """Stop taking work, fail idle runs, cancel active ones and await cleanup."""
+        """Stop taking work, cancel active runs, await their cleanup and close storage.
+
+        Idle runs are left as stored: queued and approved runs are queued again, and
+        waiting ones keep waiting, when the next process starts. So is an approved run whose
+        resume is cancelled here: an acknowledged approval is never dropped.
+        """
         self._stopping = True
         if self._sweeper is not None:
             self._sweeper.cancel()
             await asyncio.gather(self._sweeper, return_exceptions=True)
             self._sweeper = None
-        # Shutdown wins over expiry: waiting runs end as shutdown, not approval_expired.
-        idle = [
-            run_id
-            for run_id, run in self._runs.items()
-            if run_id in self._enqueued or run.status == "waiting_for_approval"
-        ]
-        self._resuming.clear()
-        for run_id in idle:
-            self._fail(run_id, self._error(run_id, "shutdown", SHUTDOWN_MESSAGE))
-            await self._graph.checkpointer.adelete_thread(run_id)
         for worker in self._workers:
             worker.cancel()
         if self._workers:
@@ -258,6 +276,57 @@ class RunManager:
             if pending:
                 logger.warning("%d run worker(s) did not stop in time", len(pending))
         self._workers = []
+        self._store.close()
+        if isinstance(self._graph.checkpointer, AsyncSqliteSaver):
+            await self._graph.checkpointer.conn.close()
+
+    async def _recover(self) -> None:
+        """Apply the restart semantics in the module docstring to every unfinished run."""
+        paused: set[str] = set()
+        for run in self._store.with_status("queued", "running", "waiting_for_approval"):
+            run_id = run.run_id
+            if run.status == "waiting_for_approval":
+                if await self._paused_for_approval(run_id):
+                    paused.add(run_id)
+                    continue
+            elif run.status == "queued" or (
+                run.stage == "resuming" and await self._paused_for_approval(run_id)
+            ):
+                if run.status == "running":
+                    self._resuming.add(run_id)
+                    paused.add(run_id)
+                try:
+                    self.enqueue(run_id)
+                    continue
+                except QueueFullError:
+                    self._resuming.discard(run_id)
+                    paused.discard(run_id)
+            elif run.stage == "resuming" and await self._resume_finished(run_id):
+                # The resume reached the end; only recording its outcome was lost.
+                self._finish(run_id)
+                continue
+            logger.warning(
+                "Run %s: interrupted by a restart during %s", run_id, run.stage
+            )
+            self._fail(run_id, self._error(run_id, "shutdown", RESTART_MESSAGE))
+        # Only paused runs can use a checkpoint; any other is left over from the last process.
+        checkpointer = self._graph.checkpointer
+        threads = {
+            saved.config["configurable"]["thread_id"]
+            async for saved in checkpointer.alist(None)
+        }
+        for thread_id in threads - paused:
+            await checkpointer.adelete_thread(thread_id)
+
+    async def _paused_for_approval(self, run_id: str) -> bool:
+        """Whether the run's checkpoint is paused at the approval interrupt."""
+        state = await self._graph.aget_state({"configurable": {"thread_id": run_id}})
+        return state.next == ("human_approval",) and bool(state.interrupts)
+
+    async def _resume_finished(self, run_id: str) -> bool:
+        """Whether the run's checkpoint shows an approved resume that reached the end."""
+        state = await self._graph.aget_state({"configurable": {"thread_id": run_id}})
+        return not state.next and state.values.get("approval_status") == "approved"
 
     def submit(self, task: str, language: Language) -> Run:
         """Create a queued run and enqueue it; raise if stopping or nothing fits."""
@@ -275,14 +344,14 @@ class RunManager:
             created_at=created,
             updated_at=created,
         )
-        self._runs[run.run_id] = run
+        self._store.put(run)
         self.enqueue(run.run_id)
         self._forget_old_runs()
         return run
 
     def enqueue(self, run_id: str) -> bool:
         """Queue a new or resuming run once; False if unknown, already queued or started."""
-        run = self._runs.get(run_id)
+        run = self._store.get(run_id)
         claimable = run is not None and (
             run.status == "queued" or run_id in self._resuming
         )
@@ -296,7 +365,7 @@ class RunManager:
         return True
 
     def get(self, run_id: str) -> Run | None:
-        return self._runs.get(run_id)
+        return self._store.get(run_id)
 
     async def _waiting_run(self, run_id: str) -> Run:
         """The run, if it is still waiting for a human; otherwise raise why not.
@@ -307,7 +376,7 @@ class RunManager:
         """
         if self._stopping:
             raise RunManagerStoppedError
-        run = self._runs.get(run_id)
+        run = self._store.get(run_id)
         if run is None:
             raise RunNotFoundError
         if run.approval_status == "expired":
@@ -329,7 +398,7 @@ class RunManager:
         """
         await self._waiting_run(run_id)
         self._update(run_id, approval_expires_at=self._clock() + self._approval_timeout)
-        return self._runs[run_id]
+        return self._store.get(run_id)
 
     async def resolve_approval(self, run_id: str, decision: Decision) -> Run:
         """Apply a human decision to a run waiting for approval.
@@ -351,7 +420,7 @@ class RunManager:
             )
             logger.warning("Run %s: solution rejected", run_id)
             await self._graph.checkpointer.adelete_thread(run_id)
-            return self._runs[run_id]
+            return self._store.get(run_id)
         self._resuming.add(run_id)
         self._update(
             run_id, status="running", stage="resuming", approval_status="approved"
@@ -367,7 +436,7 @@ class RunManager:
                 approval_status=run.approval_status,
             )
             raise
-        return self._runs[run_id]
+        return self._store.get(run_id)
 
     def _approval_expired(self, run: Run) -> bool:
         return (
@@ -389,7 +458,9 @@ class RunManager:
         if self._stopping:
             return []
         expired = [
-            run_id for run_id, run in self._runs.items() if self._approval_expired(run)
+            run.run_id
+            for run in self._store.with_status("waiting_for_approval")
+            if self._approval_expired(run)
         ]
         # Mark them all before awaiting, so no approval can slip in between.
         for run_id in expired:
@@ -413,18 +484,25 @@ class RunManager:
             run_id = await self._queue.get()
             try:
                 await self._execute(run_id)
+            # Storage errors (a full disk, say) must not end the worker; whatever state the
+            # run was left in is reconciled at the next start.
+            except Exception:
+                logger.exception("Run %s: could not be recorded", run_id)
             finally:
                 self._queue.task_done()
 
     async def _execute(self, run_id: str) -> None:
         self._enqueued.discard(run_id)
-        run = self._runs.get(run_id)
+        run = self._store.get(run_id)
         resuming = run_id in self._resuming
         self._resuming.discard(run_id)
         if self._stopping or run is None or not (run.status == "queued" or resuming):
             return  # Shutting down, forgotten, or already claimed: never run twice.
-        # Claim it before the first await, so no other worker can start it too.
-        self._update(run_id, status="running")
+        # Claim it before the first await, so no other worker can start it too. A new run
+        # reads as analyzing at once: loading its checkpoint must not show running/queued.
+        self._update(
+            run_id, status="running", **({} if resuming else {"stage": "analyzing"})
+        )
         graph_input: dict[str, Any] | Command = (
             Command(resume={"decision": "approve"})
             if resuming
@@ -439,11 +517,13 @@ class RunManager:
             # (for example removing a sandbox container) runs before we get here.
             self._fail(run_id, self._error(run_id, "run_timeout", RUN_TIMEOUT_MESSAGE))
         except asyncio.CancelledError:
-            self._fail(run_id, self._error(run_id, "shutdown", SHUTDOWN_MESSAGE))
+            # A cancelled resume stays approved and resuming; the next start finishes it.
+            if not resuming:
+                self._fail(run_id, self._error(run_id, "shutdown", SHUTDOWN_MESSAGE))
             raise
         # Worker boundary: any failure must become a safe, failed run, never a dead worker.
         except Exception as exc:  # noqa: BLE001
-            self._fail(run_id, safe_error(exc, self._runs[run_id].stage), exc)
+            self._fail(run_id, safe_error(exc, self._store.get(run_id).stage), exc)
         else:
             if approval_request is None:
                 self._finish(run_id)
@@ -462,7 +542,7 @@ class RunManager:
                     approval_expires_at=requested_at + self._approval_timeout,
                 )
         finally:
-            if self._runs[run_id].status in FINISHED_STATUSES:
+            if self._store.get(run_id).status in FINISHED_STATUSES:
                 await self._graph.checkpointer.adelete_thread(run_id)
 
     async def _drive_graph(
@@ -477,7 +557,10 @@ class RunManager:
             stream_mode=["tasks", "updates"],
         ):
             if mode == "tasks" and "input" in chunk and chunk["name"] in NODE_STAGES:
-                self._update(run_id, stage=NODE_STAGES[chunk["name"]])
+                stage = NODE_STAGES[chunk["name"]]
+                # The claim already set the first stage; a retry re-enters executing.
+                if self._store.get(run_id).stage != stage:
+                    self._update(run_id, stage=stage)
             elif mode == "updates":
                 for node, values in chunk.items():
                     if node == "__interrupt__":
@@ -492,13 +575,11 @@ class RunManager:
         return interrupted
 
     def _update(self, run_id: str, **changes: Any) -> None:
-        run = self._runs[run_id]
-        self._runs[run_id] = run.model_copy(
-            update={**changes, "updated_at": self._clock()}
-        )
+        run = self._store.get(run_id)
+        self._store.put(run.model_copy(update={**changes, "updated_at": self._clock()}))
 
     def _error(self, run_id: str, code: str, message: str) -> RunError:
-        return RunError(code=code, message=message, stage=self._runs[run_id].stage)
+        return RunError(code=code, message=message, stage=self._store.get(run_id).stage)
 
     def _fail(
         self, run_id: str, error: RunError, exc: BaseException | None = None
@@ -512,7 +593,7 @@ class RunManager:
         self._update(run_id, status="failed", stage="failed", error=error)
 
     def _finish(self, run_id: str) -> None:
-        result = self._runs[run_id].execution_result
+        result = self._store.get(run_id).execution_result
         if result is not None and result.status == "infrastructure_error":
             # The code never ran, so the run did not complete. Sandbox output here would
             # be daemon messages, not program output, so it is not exposed.
@@ -532,7 +613,7 @@ class RunManager:
                 ),
             )
             return
-        run = self._runs[run_id]
+        run = self._store.get(run_id)
         decision = route_repair(
             run.critic_result, run.revision_count, run.execution_retry_count
         )
@@ -571,14 +652,8 @@ class RunManager:
         )
 
     def _forget_old_runs(self) -> None:
-        """Keep memory bounded: drop the oldest finished runs beyond the retention limit."""
-        excess = len(self._runs) - self._max_retained_runs
-        if excess <= 0:
-            return
-        finished = [
-            run_id
-            for run_id, run in self._runs.items()
-            if run.status in FINISHED_STATUSES
-        ]
-        for run_id in finished[:excess]:
-            del self._runs[run_id]
+        """Keep storage bounded: drop the oldest finished runs beyond the retention limit.
+
+        Finished runs have no checkpoint left, so this never touches a paused graph.
+        """
+        self._store.forget_finished(keep=self._max_retained_runs)

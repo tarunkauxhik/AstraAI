@@ -4,9 +4,15 @@ services:
     env_file: ./backend/.env
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      # Runs and checkpoints outlive the container; see README "Durability".
+      - astraai-data:/app/data
     develop:
       watch:
         - action: rebuild
           path: ./backend/app
         - action: rebuild
           path: ./backend/uv.lock
+
+volumes:
+  astraai-data:

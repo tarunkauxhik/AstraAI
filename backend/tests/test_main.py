@@ -8,7 +8,9 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.main import app
+from app.runs import RunManager
 from app.sandbox.executor import SandboxExecutor
+from tests.conftest import StartupSandbox
 from tests.fake_llm import (
     VALID_CRITIC_RESULT,
     VALID_GENERATED_TESTS,
@@ -418,3 +420,63 @@ def test_a_rejected_run_cannot_be_decided_again(api: Api) -> None:
     )
     assert [response.status_code for response in again] == [409, 409]
     assert again[0].json() == {"detail": "The run is not waiting for approval."}
+
+
+# Restarts over HTTP: each `with api()` block is one process; they share the test's data.
+
+
+def test_a_run_waiting_for_approval_is_approved_after_a_restart(api: Api) -> None:
+    with api() as client:
+        run_id = paused_run(client)
+        before = client.get(f"/runs/{run_id}").json()
+
+    with api() as client:
+        assert client.get(f"/runs/{run_id}").json() == before
+        approval = client.post(f"/runs/{run_id}/approval", json={"decision": "approve"})
+        assert approval.status_code == 202
+        run = poll(client, run_id, finished)
+
+    assert (run["status"], run["approval_status"], run["error"]) == (
+        "completed",
+        "approved",
+        None,
+    )
+    for field in ("generated_tests", "generated_code", "execution_result"):
+        assert run[field] == before[field]
+
+
+def test_finished_runs_are_still_served_after_a_restart(api: Api) -> None:
+    with api() as client:
+        run_id = paused_run(client)
+        client.post(f"/runs/{run_id}/approval", json={"decision": "approve"})
+        completed = poll(client, run_id, finished)
+
+    with api() as client:
+        assert client.get(f"/runs/{run_id}").json() == completed
+        decided = client.post(f"/runs/{run_id}/approval", json={"decision": "approve"})
+        assert decided.status_code == 409
+        assert client.get("/runs/not-a-run").status_code == 404
+
+
+def test_startup_removes_leftover_sandboxes_before_recovering_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    class RecordingSandbox(StartupSandbox):
+        async def remove_leftovers(self) -> None:
+            order.append("remove_leftovers")
+
+    start = RunManager.start
+
+    async def recording_start(self: RunManager) -> None:
+        order.append("start")
+        await start(self)
+
+    monkeypatch.setattr("app.main.DockerSandbox", RecordingSandbox)
+    monkeypatch.setattr(RunManager, "start", recording_start)
+
+    with TestClient(app):
+        pass
+
+    assert order == ["remove_leftovers", "start"]

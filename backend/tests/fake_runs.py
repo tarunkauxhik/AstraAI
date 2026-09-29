@@ -4,21 +4,45 @@ import asyncio
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx2
 from fastapi.testclient import TestClient
+from langgraph.graph.state import CompiledStateGraph
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.graph import build_checkpointer, build_graph
 from app.llm import LLMClient
-from app.runs import RunManager
+from app.runs import Run, RunManager
 from app.sandbox.executor import SandboxExecutor
 from app.state import ExecutionResult, GeneratedCode, GraphContext
+from app.store import RunStore
 from tests.fake_llm import WORKFLOW_REPLIES, Reply, fake_llm, forced_tool, tool_call
 from tests.fake_sandbox import PASSED, FakeSandbox
 
 STEPS = ("Requirements", "GeneratedTests", "GeneratedCode", "sandbox", "CriticResult")
+
+
+def storage(data_dir: Path | None = None) -> tuple[CompiledStateGraph, RunStore]:
+    """The graph and run store on real SQLite files, as the app builds them.
+
+    Defaults to the test's own data dir, so a second manager in the same test finds the
+    first one's runs, as a restarted process would. Needs a running event loop.
+    """
+    data_dir = data_dir or get_settings().data_dir
+    data_dir.mkdir(parents=True, exist_ok=True)
+    graph = build_graph(build_checkpointer(data_dir / "checkpoints.sqlite3"))
+    return graph, RunStore(data_dir / "runs.sqlite3")
+
+
+def stored(run_id: str) -> Run | None:
+    """Read a run straight from the test's run store, as the next process would."""
+    store = RunStore(get_settings().data_dir / "runs.sqlite3")
+    try:
+        return store.get(run_id)
+    finally:
+        store.close()
 
 
 class GatedSandbox(FakeSandbox):
@@ -90,9 +114,11 @@ def manager_factory(
     """
 
     def build(settings: Settings, context: GraphContext) -> RunManager:
+        graph, store = storage(settings.data_dir)
         return RunManager(
-            build_graph(build_checkpointer()),
+            graph,
             GraphContext(llm=fake_llm(reply), sandbox=sandbox()),
+            store,
             max_active_runs=1,
             max_queued_runs=max_queued_runs,
             max_retained_runs=100,

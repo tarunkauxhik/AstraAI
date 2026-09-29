@@ -21,6 +21,7 @@ from app.runs import (
 )
 from app.sandbox.docker import DockerSandbox
 from app.state import ApprovalDecision, GraphContext, Language
+from app.store import RunStore
 
 
 class HealthResponse(BaseModel):
@@ -46,9 +47,12 @@ class ApprovalExtended(BaseModel):
 
 
 def build_run_manager(settings: Settings, context: GraphContext) -> RunManager:
+    """The run manager on durable storage in settings.data_dir; it closes both on stop."""
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
     return RunManager(
-        build_graph(build_checkpointer()),
+        build_graph(build_checkpointer(settings.data_dir / "checkpoints.sqlite3")),
         context,
+        RunStore(settings.data_dir / "runs.sqlite3"),
         max_active_runs=settings.run_max_active_runs,
         max_queued_runs=settings.run_max_queued_runs,
         max_retained_runs=settings.run_max_retained_runs,
@@ -62,10 +66,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # One LLM client, sandbox and run manager per process; fails fast on bad configuration.
     settings = get_settings()
     llm = LLMClient(settings)
-    runs = build_run_manager(
-        settings, GraphContext(llm=llm, sandbox=DockerSandbox(settings))
-    )
+    sandbox = DockerSandbox(settings)
+    runs = build_run_manager(settings, GraphContext(llm=llm, sandbox=sandbox))
     app.state.runs = runs
+    # Before recovery: an execution interrupted by a crash must not keep running.
+    await sandbox.remove_leftovers()
     await runs.start()
     try:
         yield

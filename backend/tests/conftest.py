@@ -1,6 +1,26 @@
+from pathlib import Path
+
 import pytest
 
 from app.config import Settings, get_settings
+from app.sandbox.docker import DockerSandbox
+
+
+class StartupSandbox(DockerSandbox):
+    """The app's sandbox, minus removing leftover containers from the real Docker daemon."""
+
+    async def remove_leftovers(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def app_startup(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep app startup away from real data and, outside `docker` tests, real containers."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    if not request.node.get_closest_marker("docker"):
+        monkeypatch.setattr("app.main.DockerSandbox", StartupSandbox)
 
 
 @pytest.fixture(autouse=True)

@@ -14,7 +14,8 @@ RUN uv sync --frozen --no-dev
 
 COPY app ./app
 
-RUN useradd --create-home --uid 10001 astraai
+# The data volume mounts here; a new named volume copies this owner.
+RUN useradd --create-home --uid 10001 astraai     && mkdir /app/data && chown astraai:astraai /app/data
 USER astraai
 
 EXPOSE 8000

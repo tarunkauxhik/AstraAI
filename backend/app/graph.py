@@ -1,6 +1,9 @@
+from pathlib import Path
+
+import aiosqlite
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -34,14 +37,24 @@ CHECKPOINTED_MODELS = (
 )
 
 
-def build_checkpointer() -> InMemorySaver:
-    """One in-memory checkpointer for the whole process; runs are isolated by thread_id.
+def checkpoint_serde() -> JsonPlusSerializer:
+    """Checkpoint serialization that only revives the application's own models.
 
     State holds application data only: the LLM client and sandbox travel in the runtime
     context, which is never checkpointed.
     """
     allowed = [(model.__module__, model.__name__) for model in CHECKPOINTED_MODELS]
-    return InMemorySaver(serde=JsonPlusSerializer(allowed_msgpack_modules=allowed))
+    return JsonPlusSerializer(allowed_msgpack_modules=allowed)
+
+
+def build_checkpointer(path: str | Path) -> AsyncSqliteSaver:
+    """One SQLite checkpointer for the whole process; runs are isolated by thread_id.
+
+    Needs a running event loop. It connects on first use, and whoever owns it closes
+    `checkpointer.conn`. Its own file: it holds a write lock across awaits, which must not
+    meet the run store's synchronous writes.
+    """
+    return AsyncSqliteSaver(aiosqlite.connect(path), serde=checkpoint_serde())
 
 
 def build_graph(checkpointer: BaseCheckpointSaver | None) -> CompiledStateGraph:

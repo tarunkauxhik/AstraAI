@@ -104,6 +104,8 @@ class FakeDockerCli:
     still_running: bool = False
     hang: bool = False
     failing: tuple[str, ...] = ()
+    # What `docker ps` lists: container ids left over from an earlier process.
+    listed: bytes = b""
     commands: list[list[str]] = field(default_factory=list)
     archive: bytes = b""
     released: asyncio.Event = field(default_factory=asyncio.Event)
@@ -133,6 +135,8 @@ class FakeDockerCli:
                 ]
             )
             return FakeProcess(0, state.encode())
+        if subcommand == "ps":
+            return FakeProcess(0, self.listed)
         if subcommand == "kill":
             self.released.set()
         return FakeProcess(0)

@@ -4,7 +4,8 @@ from pathlib import Path
 from pydantic import Field, HttpUrl, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+ENV_FILE = BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
@@ -41,6 +42,9 @@ class Settings(BaseSettings):
     # How long a verified solution waits for a human decision before the run expires.
     # Separate from run_timeout_seconds, which counts active work only.
     approval_timeout_seconds: float = Field(default=600, ge=5, le=86_400)
+    # Durable run records and graph checkpoints (two SQLite files). Must outlive the process,
+    # so in a container it is a mounted volume, never the image's own filesystem.
+    data_dir: Path = BACKEND_DIR / "data"
 
 
 @lru_cache

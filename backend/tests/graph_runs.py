@@ -2,10 +2,11 @@
 
 from typing import Any
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
-from app.graph import build_checkpointer, build_graph
+from app.graph import build_graph, checkpoint_serde
 from app.state import GraphContext
 
 
@@ -14,7 +15,8 @@ def thread(run_id: str) -> dict[str, Any]:
 
 
 def checkpointed_graph() -> CompiledStateGraph:
-    return build_graph(build_checkpointer())
+    """For graph-level tests; run lifecycle tests use the durable SQLite checkpointer."""
+    return build_graph(InMemorySaver(serde=checkpoint_serde()))
 
 
 async def start(

@@ -174,8 +174,8 @@ export function RunPage() {
       {state.kind === "not_found" && (
         <CenteredMessage title="Run not found">
           <p>
-            There is no run with this ID. Runs are kept in memory, so they disappear when the
-            service restarts or after many newer runs have finished.
+            There is no run with this ID. Finished runs are removed after many newer runs
+            have finished.
           </p>
         </CenteredMessage>
       )}

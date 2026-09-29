@@ -62,6 +62,7 @@ Fill in `backend/.env`:
 | `LLM_RETRY_BACKOFF_SECONDS` | Optional. Backoff × attempt number between tries; a 429's Retry-After up to 30s wins (1) |
 | `LLM_MAX_CONCURRENCY` | Optional. LLM requests in flight at once per process, 1-8 (2) |
 | `APPROVAL_TIMEOUT_SECONDS` | Optional. Seconds a verified solution waits for a human decision (restartable with more time) before the run expires, 5-86400 (600) |
+| `DATA_DIR` | Optional. Directory for the run and checkpoint databases (`backend/data`) |
 
 Run lifecycle and sandbox limits are listed, with defaults, in `backend/.env.example`.
 
@@ -125,7 +126,7 @@ A failed run carries a safe `error` of `{code, message, stage}`, never internal 
 A run is `completed` only when the critic accepts the final code **and a human approves it**.
 When the critic accepts, the run pauses at `waiting_for_approval` (`approval_status: pending`,
 `approval_required: true`) with a compact `approval_request` and `approval_expires_at`. The
-paused graph is checkpointed in memory under the run id and frees the worker for other runs.
+paused graph is checkpointed in SQLite under the run id and frees the worker for other runs.
 Approving sets `approval_status: approved` and stage `resuming`, then continues the same
 LangGraph thread without repeating any LLM call or execution. Rejecting fails the run at once
 with `approval_rejected`. With no decision within `APPROVAL_TIMEOUT_SECONDS`, counted from
@@ -141,13 +142,42 @@ keeping the latest code, execution result and critic result. `revision_count` an
 `execution_retry_count` show how much of each budget a run used.
 
 One full run executes at a time (`RUN_MAX_ACTIVE_RUNS`), up to `RUN_MAX_QUEUED_RUNS` wait,
-and the newest `RUN_MAX_RETAINED_RUNS` finished runs are kept in memory.
+and the newest `RUN_MAX_RETAINED_RUNS` runs are kept; only finished runs are ever removed.
 
 A whole run is stopped after `RUN_TIMEOUT_SECONDS` (300) of active work (per-LLM-call and
 sandbox timeouts still apply inside it; time waiting for approval never counts) and fails with `run_timeout`; its sandbox container is removed and the
-next queued run starts. On shutdown the service stops accepting runs (`POST` returns 503),
-queued and approval-waiting runs fail with `shutdown`, and the active run is cancelled and its container removed
-before the process exits. Runs are held in memory, so a restart forgets them.
+next queued run starts. On shutdown the service stops accepting runs (`POST` returns 503) and
+the active run is cancelled, failing with `shutdown`, and its container removed before the
+process exits, unless it was resuming an approved run: queued, approval-waiting and
+approved runs are all left for the next start.
+
+## Durability
+
+Runs survive restarts. Two SQLite files live in `DATA_DIR` (default `backend/data`, a named
+volume under Docker): `runs.sqlite3` holds every run exactly as `GET /runs/{run_id}` returns
+it and is the only source of truth for the API; `checkpoints.sqlite3` holds LangGraph
+checkpoints, only for runs paused at approval, so an approval after a restart resumes the
+same thread. On start, before any run executes, leftover sandbox containers are removed and
+each unfinished run is reconciled:
+
+| Stored as | After a restart |
+| --- | --- |
+| `queued` | Queued again in its original order; it had not started. |
+| `running` (any working stage) | `failed` with `shutdown`, keeping the evidence it had. The work is never continued and no unobserved execution is reported. |
+| `waiting_for_approval` | Still waiting, same `approval_expires_at`; approve, reject or extend as before. Fails with `shutdown` if its checkpoint is missing. |
+| `running` / `resuming` (approved) | Completes: resumes the same thread if its checkpoint is paused at approval, or records the completion if the resume already reached the end. Resuming replays only the approval step, which has no side effects, so repeated crashes never repeat work. Fails with `shutdown` only without a usable checkpoint. |
+| `completed`, `failed`, `expired` | Unchanged, with all evidence. |
+
+Both databases use SQLite's WAL mode: each is its `.sqlite3` file plus the `-wal` and
+`-shm` files beside it, and after a crash the latest writes may exist only in `-wal`. Back
+up by stopping the service and copying the whole `DATA_DIR`, those files included; never
+copy a `.sqlite3` file alone, or one database without the other. Reset by stopping the
+service and deleting the whole `DATA_DIR` (`docker compose down --volumes` under Docker,
+whose named volume is that directory); it is recreated empty on start.
+
+One API process per `DATA_DIR`. One AstraAi process owns the Docker sandbox namespace
+(containers named `astraai-sandbox-*`) on a Docker daemon, and removes any it finds there
+when it starts.
 
 ## Generated code contract
 
