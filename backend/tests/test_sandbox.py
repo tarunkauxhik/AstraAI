@@ -1,11 +1,13 @@
 import asyncio
+import io
+import tarfile
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.sandbox.docker import DockerSandbox, parse_state
+from app.sandbox.docker import DockerSandbox, Run, parse_state, pytest_result
 from app.sandbox.executor import LANGUAGES
 from app.state import ExecutionResult, GeneratedCode, GraphContext
 from tests.fake_llm import (
@@ -473,3 +475,125 @@ def test_nothing_is_removed_without_leftovers_or_a_listing(
     remove_leftovers(cli, monkeypatch)
 
     assert cli.ran("rm") == []
+
+
+# DEVELOP: a repository's own tests, run as they are.
+
+
+def run_repository(
+    cli: FakeDockerCli, monkeypatch: pytest.MonkeyPatch, files: dict[str, bytes]
+) -> ExecutionResult:
+    monkeypatch.setattr("app.sandbox.docker.asyncio.create_subprocess_exec", cli)
+    return asyncio.run(DockerSandbox(Settings()).run_repository(files))
+
+
+def test_a_repository_gets_the_same_lockdown_with_room_for_its_files() -> None:
+    args = DockerSandbox(Settings()).repository_args("astraai-sandbox-test")
+
+    for flag, value in [
+        ("--network", "none"),
+        ("--user", "65534:65534"),
+        ("--security-opt", "no-new-privileges"),
+        ("--cap-drop", "ALL"),
+        ("--pids-limit", "256"),
+        ("--memory", "1024m"),
+        ("--memory-swap", "1024m"),
+        ("--workdir", "/sandbox"),
+    ]:
+        assert args[args.index(flag) + 1] == value
+    assert "--read-only" in args
+    assert not {"-v", "--volume", "--mount", "--privileged"} & set(args)
+    tmpfs = args[args.index("--tmpfs") + 1]
+    assert tmpfs.startswith("/sandbox:") and "noexec" in tmpfs and "size=256m" in tmpfs
+    assert args[-4] == "astraai-sandbox-python:3.12.14-pytest9.1.1"
+    environment = [args[i + 1] for i, arg in enumerate(args) if arg == "--env"]
+    assert "TMPDIR=/sandbox/.tmp" in environment
+    assert not any("TOKEN" in value.upper() for value in environment)
+
+
+def test_the_repository_runs_as_is_and_nothing_is_installed() -> None:
+    command = DockerSandbox(Settings()).repository_args("astraai-sandbox-test")[-1]
+
+    assert command.endswith("exec python -m pytest -q -rfE -p no:cacheprovider")
+    assert not any(
+        word in command for word in ("pip", "install", "requirements", "uv ")
+    )
+
+
+def test_exactly_the_snapshot_is_streamed_into_the_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = FakeDockerCli(stdout=b"tests/test_add.py .\n1 passed in 0.01s\n")
+    files = {
+        "README.md": b"# sample\n",
+        "pkg/__init__.py": b"",
+        "tests/test_x.py": b"x",
+    }
+
+    run_repository(cli, monkeypatch, files)
+
+    assert cli.archive_names() == sorted(files)
+    with tarfile.open(fileobj=io.BytesIO(cli.sent_archive)) as archive:
+        assert {m.name: archive.extractfile(m).read() for m in archive} == files
+    assert len(cli.ran("rm")) == 1
+
+
+def test_the_end_of_long_output_is_kept_for_the_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = b"." * 200_000 + b"\n3 passed, 1 failed in 9.99s\n"
+    cli = FakeDockerCli(stdout=output, exit_code=1)
+
+    result = run_repository(cli, monkeypatch, {"test_x.py": b""})
+
+    assert result.output_truncated
+    assert result.stdout.endswith("3 passed, 1 failed in 9.99s\n")
+    assert (result.tests_passed, result.tests_failed) == (3, 1)
+
+
+def pytest_run(stdout: str, timed_out: bool = False) -> Run:
+    return Run(stdout=stdout, stderr="", timed_out=timed_out, truncated=False)
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "stdout", "expected"),
+    [
+        (0, "128 passed in 3.10s", ("passed", None, 128, 0)),
+        (0, "126 passed, 3 warnings in 1.20s", ("passed", None, 126, 0)),
+        (
+            1,
+            "2 failed, 126 passed, 1 skipped in 3.10s",
+            ("failed", "test_failure", 126, 2),
+        ),
+        (1, "1 failed, 5 passed, 2 errors in 1.00s", ("failed", "test_failure", 5, 3)),
+        (5, "no tests ran in 0.01s", ("passed", None, 0, 0)),
+        (
+            2,
+            "1 error in 0.10s\nInterrupted: 1 error during collection",
+            ("failed", "environment_error", None, None),
+        ),
+        (4, "ERROR: usage error", ("failed", "environment_error", None, None)),
+        (127, "", ("failed", "environment_error", None, None)),
+    ],
+)
+def test_pytest_outcomes(exit_code: int, stdout: str, expected: tuple) -> None:
+    result = pytest_result(pytest_run(stdout), exit_code, False, 42)
+
+    assert (
+        result.status,
+        result.error_type,
+        result.tests_passed,
+        result.tests_failed,
+    ) == (expected)
+    assert result.duration_ms == 42
+
+
+def test_limits_mean_the_suite_did_not_finish() -> None:
+    timed_out = pytest_result(pytest_run("....", timed_out=True), 137, False, 1)
+    out_of_memory = pytest_result(pytest_run("...."), 137, True, 1)
+
+    assert (timed_out.status, timed_out.tests_passed) == ("timed_out", None)
+    assert (out_of_memory.status, out_of_memory.tests_passed) == (
+        "resource_exceeded",
+        None,
+    )

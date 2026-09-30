@@ -19,6 +19,7 @@ import {
   describeEnding,
   failingEvidence,
   runPhase,
+  runRequest,
   testRunSummary,
   workDurationMs,
   workSteps,
@@ -244,10 +245,9 @@ function EndingActions({ run, actions, onOpenLog }: { run: Run; actions: EndingA
   const code = run.generated_code
 
   function runAgain() {
-    createRun.mutate(
-      { task: run.task, language: run.language },
-      { onSuccess: (accepted) => navigate(`/runs/${accepted.run_id}`) },
-    )
+    createRun.mutate(runRequest(run), {
+      onSuccess: (accepted) => navigate(`/runs/${accepted.run_id}`),
+    })
   }
 
   // The first available action leads; the rest are quieter.
@@ -303,7 +303,7 @@ function EndingActions({ run, actions, onOpenLog }: { run: Run; actions: EndingA
                   variant={variant(action)}
                   size="lg"
                   className={ACTION}
-                  onClick={() => navigate("/", { state: { task: run.task, language: run.language } })}
+                  onClick={() => navigate("/", { state: runRequest(run) })}
                 >
                   Edit task
                 </Button>

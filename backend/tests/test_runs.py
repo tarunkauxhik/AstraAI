@@ -7,7 +7,7 @@ import pytest
 from langgraph.types import Command
 
 from app.config import Settings
-from app.graph import build_graph
+from app.graph import build_develop_graph, build_graph
 from app.llm import LLMClient, LLMError, LLMTimeoutError
 from app.repair import MAX_REVISIONS
 from app.runs import (
@@ -373,7 +373,11 @@ def test_safe_error_never_repeats_the_exception_message(
 
 
 def test_every_working_graph_node_has_a_stage() -> None:
-    nodes = set(build_graph(None).get_graph().nodes) - {"__start__", "__end__"}
+    nodes = {
+        node
+        for graph in (build_graph(None), build_develop_graph(None))
+        for node in graph.get_graph().nodes
+    } - {"__start__", "__end__"}
 
     # human_approval only pauses; the manager reports that as waiting_for_approval.
     assert nodes - {"human_approval"} == set(NODE_STAGES)

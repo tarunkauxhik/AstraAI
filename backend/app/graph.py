@@ -13,9 +13,11 @@ from app.nodes.execute_sandbox import execute_sandbox
 from app.nodes.generate_code import generate_code
 from app.nodes.generate_tests import generate_tests
 from app.nodes.human_approval import human_approval
+from app.nodes.prepare_repository import prepare_repository
 from app.nodes.retry_execution import retry_execution
 from app.nodes.revise_code import revise_code
 from app.nodes.revise_tests import revise_tests
+from app.nodes.run_existing_tests import run_existing_tests
 from app.repair import repair_router
 from app.state import (
     AgentState,
@@ -24,6 +26,7 @@ from app.state import (
     GeneratedCode,
     GeneratedTests,
     GraphContext,
+    RepositoryRef,
     Requirements,
 )
 
@@ -34,6 +37,7 @@ CHECKPOINTED_MODELS = (
     GeneratedCode,
     ExecutionResult,
     CriticResult,
+    RepositoryRef,
 )
 
 
@@ -94,4 +98,18 @@ def build_graph(checkpointer: BaseCheckpointSaver | None) -> CompiledStateGraph:
     builder.add_edge("revise_tests", "execute_sandbox")
     builder.add_edge("retry_execution", "execute_sandbox")
     builder.add_edge("human_approval", END)
+    return builder.compile(checkpointer=checkpointer)
+
+
+def build_develop_graph(checkpointer: BaseCheckpointSaver | None) -> CompiledStateGraph:
+    """DEVELOP, first slice: the repository at its current commit, and its own tests.
+
+    Shares the SOLVE graph's checkpointer; a run's mode decides which graph drives it.
+    """
+    builder = StateGraph(AgentState, context_schema=GraphContext)
+    builder.add_node("prepare_repository", prepare_repository)
+    builder.add_node("run_existing_tests", run_existing_tests)
+    builder.add_edge(START, "prepare_repository")
+    builder.add_edge("prepare_repository", "run_existing_tests")
+    builder.add_edge("run_existing_tests", END)
     return builder.compile(checkpointer=checkpointer)

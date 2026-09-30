@@ -6,6 +6,7 @@ Run with ASTRAAI_DOCKER_TESTS=1. Never part of the normal test run.
 import asyncio
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -426,3 +427,113 @@ def test_startup_removes_only_real_leftover_containers() -> None:
             capture_output=True,
             check=False,
         )
+
+
+# DEVELOP: a repository's own tests, on the pinned image, exactly as they are.
+
+SANDBOX_IMAGE_DIR = Path(__file__).resolve().parents[1] / "sandbox"
+
+
+@pytest.fixture(scope="module")
+def develop_image() -> None:
+    """Build the DEVELOP image if needed. Only the build uses the network, never a run."""
+    subprocess.run(
+        ["docker", "build", "-q", "-t", Settings().sandbox_develop_image]
+        + [str(SANDBOX_IMAGE_DIR)],
+        check=True,
+        capture_output=True,
+    )
+
+
+def repository(files: dict[str, str]) -> ExecutionResult:
+    snapshot = {path: text.encode() for path, text in files.items()}
+    return asyncio.run(DockerSandbox(Settings()).run_repository(snapshot))
+
+
+@pytest.mark.usefixtures("develop_image")
+def test_a_repositorys_existing_tests_run_as_they_are() -> None:
+    result = repository(
+        {
+            "calc/__init__.py": "def add(a, b):\n    return a + b\n",
+            "tests/test_calc.py": "from calc import add\n\n\n"
+            "def test_add():\n    assert add(1, 2) == 3\n\n\n"
+            "def test_wrong():\n    assert add(1, 1) == 3\n",
+            # Temp files work, though the root filesystem is read-only.
+            "tests/test_tmp.py": "def test_tmp(tmp_path):\n"
+            "    (tmp_path / 'f').write_text('x')\n"
+            "    assert (tmp_path / 'f').read_text() == 'x'\n",
+        }
+    )
+
+    assert (result.status, result.error_type) == ("failed", "test_failure")
+    assert (result.tests_passed, result.tests_failed) == (2, 1)
+    assert "FAILED tests/test_calc.py::test_wrong" in result.stdout
+
+
+@pytest.mark.usefixtures("develop_image")
+def test_the_pinned_python_and_pytest_run_with_no_credentials() -> None:
+    result = repository(
+        {
+            "test_environment.py": "import os, sys\n\nimport pytest\n\n\n"
+            "def test_versions():\n"
+            "    assert sys.version_info[:3] == (3, 12, 14)\n"
+            "    assert pytest.__version__ == '9.1.1'\n\n\n"
+            "def test_no_credentials():\n"
+            "    names = [n for n in os.environ if 'TOKEN' in n or 'GITHUB' in n]\n"
+            "    assert names == []\n"
+        }
+    )
+
+    assert (result.status, result.tests_passed, result.tests_failed) == ("passed", 2, 0)
+
+
+@pytest.mark.usefixtures("develop_image")
+def test_repository_tests_have_no_network() -> None:
+    result = repository(
+        {
+            "test_network.py": "import socket\n\nimport pytest\n\n\n"
+            "def test_no_connection():\n"
+            "    with pytest.raises(OSError):\n"
+            "        socket.create_connection(('1.1.1.1', 53), timeout=3)\n\n\n"
+            "def test_no_dns():\n"
+            "    with pytest.raises(OSError):\n"
+            "        socket.getaddrinfo('pypi.org', 443)\n"
+        }
+    )
+
+    assert (result.status, result.tests_passed) == ("passed", 2)
+
+
+@pytest.mark.usefixtures("develop_image")
+def test_dependencies_are_never_installed() -> None:
+    result = repository(
+        {
+            "requirements.txt": "requests==2.32.3\n",
+            "pyproject.toml": "[project]\nname = 'x'\nversion = '0'\n"
+            "dependencies = ['requests']\n",
+            "test_uses_requests.py": "import requests\n\n\ndef test_it():\n    assert requests\n",
+        }
+    )
+
+    # The import fails at collection: the suite couldn't run here, which is not a
+    # test failure.
+    assert (result.status, result.error_type) == ("failed", "environment_error")
+    assert (result.tests_passed, result.tests_failed) == (None, None)
+    assert "No module named 'requests'" in result.stdout
+
+
+@pytest.mark.usefixtures("develop_image")
+def test_a_repository_without_tests_is_reported_as_such() -> None:
+    result = repository({"README.md": "# nothing to test\n"})
+
+    assert (result.status, result.exit_code) == ("passed", 5)
+    assert (result.tests_passed, result.tests_failed) == (0, 0)
+
+
+@pytest.mark.usefixtures("develop_image")
+def test_repository_runs_leave_nothing_behind() -> None:
+    before = sandbox_containers()
+
+    repository({"test_ok.py": "def test_ok():\n    pass\n"})
+
+    assert sandbox_containers() == before

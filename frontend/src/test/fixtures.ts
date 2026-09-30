@@ -114,6 +114,10 @@ const BASE: Run = {
   stage: "queued",
   task: "Write a function reverse(s) that returns the string reversed.",
   language: "python",
+  mode: "solve",
+  repository: null,
+  repository_ref: null,
+  existing_tests: null,
   created_at: CREATED,
   updated_at: CREATED,
   requirements: null,
@@ -342,5 +346,100 @@ export const approvedThenFailedRun = run({
     code: "internal_error",
     message: "The run failed because of an internal error.",
     stage: "resuming",
+  },
+})
+
+
+// DEVELOP, first slice: the repository at its current commit, and its own tests.
+
+const REPOSITORY_REF = {
+  full_name: "octo/sample",
+  default_branch: "main",
+  commit_sha: "4e1f0c2d9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e",
+}
+
+export const EXISTING_TESTS_PASSED: ExecutionResult = {
+  status: "passed",
+  exit_code: 0,
+  stdout: "........\n128 passed in 3.10s\n",
+  stderr: "",
+  duration_ms: 3400,
+  tests_passed: 128,
+  tests_failed: 0,
+  error_type: null,
+  output_truncated: false,
+}
+
+export const EXISTING_TESTS_FAILING: ExecutionResult = {
+  ...EXISTING_TESTS_PASSED,
+  status: "failed",
+  exit_code: 1,
+  stdout:
+    "FAILED tests/test_api.py::test_timeout - AssertionError\nFAILED tests/test_api.py::test_retry - AssertionError\n2 failed, 126 passed in 3.10s\n",
+  tests_passed: 126,
+  tests_failed: 2,
+  error_type: "test_failure",
+}
+
+const DEVELOP = run({
+  task: "Add a --json flag to the report command.",
+  mode: "develop",
+  repository: "octo/sample",
+})
+
+export const developFetchingRun = run({
+  ...DEVELOP,
+  status: "running",
+  stage: "fetching_repository",
+})
+
+export const developTestingRun = run({
+  ...DEVELOP,
+  status: "running",
+  stage: "running_existing_tests",
+  repository_ref: REPOSITORY_REF,
+})
+
+export const developCheckedRun = run({
+  ...developTestingRun,
+  status: "completed",
+  stage: "completed",
+  existing_tests: EXISTING_TESTS_PASSED,
+})
+
+export const developFailingTestsRun = run({
+  ...developCheckedRun,
+  existing_tests: EXISTING_TESTS_FAILING,
+})
+
+export const developEnvironmentRun = run({
+  ...developTestingRun,
+  status: "failed",
+  stage: "failed",
+  existing_tests: {
+    ...EXISTING_TESTS_PASSED,
+    status: "failed",
+    exit_code: 2,
+    stdout: "E   ModuleNotFoundError: No module named 'requests'\n1 error in 0.10s\n",
+    tests_passed: null,
+    tests_failed: null,
+    error_type: "environment_error",
+  },
+  error: {
+    code: "environment_unsupported",
+    message: "AstraAi couldn't run this repository in its current environment.",
+    stage: "running_existing_tests",
+  },
+})
+
+export const developNotPublicRun = run({
+  ...DEVELOP,
+  status: "failed",
+  stage: "failed",
+  error: {
+    code: "repository_not_public",
+    message:
+      "AstraAi couldn't find a public repository at this address. If it's private, GitHub access isn't configured yet.",
+    stage: "fetching_repository",
   },
 })

@@ -30,6 +30,8 @@ export const STAGE_ACTIVITY: Record<RunStage, string> = {
   reviewing: "Reviewing the solution",
   revising_code: "Fixing the solution",
   revising_tests: "Fixing the tests",
+  fetching_repository: "Getting the repository",
+  running_existing_tests: "Running the existing tests",
   waiting_for_approval: "Ready for review",
   resuming: "Accepting",
   completed: "Accepted",
@@ -54,6 +56,7 @@ const EXECUTION_ERROR_TYPES: Record<string, string> = {
   runtime_error: "Runtime error",
   timeout: "Timed out",
   out_of_memory: "Memory limit exceeded",
+  environment_error: "The tests couldn't start",
 }
 
 export function executionErrorTypeLabel(errorType: string | null): string | null {
@@ -88,6 +91,8 @@ export type FailureKind =
   | "timeout"
   | "interrupted"
   | "internal"
+  | "repository"
+  | "environment"
 
 export interface FailureCopy {
   kind: FailureKind
@@ -147,6 +152,42 @@ export const FAILURES: Record<KnownErrorCode, FailureCopy> = {
   },
   invalid_step_output: INTERNAL,
   internal_error: INTERNAL,
+  repository_not_public: {
+    kind: "repository",
+    title: "Repository not found",
+    description:
+      "AstraAi couldn't find a public repository at this address. If it's private, GitHub access isn't configured yet.",
+  },
+  repository_not_found: {
+    kind: "repository",
+    title: "Repository not found",
+    description: "AstraAi couldn't find this repository, or doesn't have access to it.",
+  },
+  repository_empty: {
+    kind: "repository",
+    title: "Repository is empty",
+    description: "This repository has no commits yet.",
+  },
+  repository_too_large: {
+    kind: "repository",
+    title: "Repository too large",
+    description: "This repository is larger than AstraAi can check right now.",
+  },
+  repository_unsupported: {
+    kind: "repository",
+    title: "Repository not supported",
+    description: "This repository contains files AstraAi can't safely handle yet, such as symbolic links.",
+  },
+  github_unavailable: {
+    kind: "service",
+    title: "GitHub unavailable",
+    description: "AstraAi couldn't get this repository from GitHub right now. Try again in a few minutes.",
+  },
+  environment_unsupported: {
+    kind: "environment",
+    title: "Couldn't run the tests",
+    description: "AstraAi couldn't run this repository in its current environment.",
+  },
 }
 
 function isKnownErrorCode(code: string): code is KnownErrorCode {

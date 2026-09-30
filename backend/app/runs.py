@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, computed_field
 
 from app.llm import LLMError, LLMTimeoutError
 from app.repair import route_repair
+from app.repository import RepositoryError
 from app.state import (
     ApprovalRequest,
     ApprovalStatus,
@@ -41,6 +42,8 @@ from app.state import (
     GeneratedTests,
     GraphContext,
     Language,
+    Mode,
+    RepositoryRef,
     Requirements,
 )
 
@@ -68,6 +71,9 @@ RunStage = Literal[
     "reviewing",
     "revising_code",
     "revising_tests",
+    # DEVELOP: getting the repository, then running its existing tests.
+    "fetching_repository",
+    "running_existing_tests",
     "waiting_for_approval",
     # Approved and about to continue on its checkpoint.
     "resuming",
@@ -88,6 +94,13 @@ NODE_STAGES: dict[str, RunStage] = {
     "revise_tests": "revising_tests",
     # A retry re-runs the same code at once, so it reads as executing.
     "retry_execution": "executing",
+    "prepare_repository": "fetching_repository",
+    "run_existing_tests": "running_existing_tests",
+}
+# Where each mode's graph starts, shown from the moment a worker claims the run.
+FIRST_STAGES: dict[Mode, RunStage] = {
+    "solve": "analyzing",
+    "develop": "fetching_repository",
 }
 RESULT_FIELDS = frozenset(
     {
@@ -99,6 +112,8 @@ RESULT_FIELDS = frozenset(
         "revision_count",
         "execution_retry_count",
         "approval_status",
+        "repository_ref",
+        "existing_tests",
     }
 )
 
@@ -123,6 +138,11 @@ class Run(BaseModel):
     stage: RunStage
     task: str
     language: Language
+    mode: Mode = "solve"
+    # DEVELOP: owner/name as submitted, the version it resolved to, and its own tests.
+    repository: str | None = None
+    repository_ref: RepositoryRef | None = None
+    existing_tests: ExecutionResult | None = None
     created_at: datetime
     updated_at: datetime
     requirements: Requirements | None = None
@@ -168,6 +188,7 @@ class ApprovalExpiredError(ApprovalConflictError):
 SHUTDOWN_GRACE_SECONDS = 30
 RUN_TIMEOUT_MESSAGE = "The run took longer than the allowed time and was stopped."
 SHUTDOWN_MESSAGE = "The run was stopped because the service is shutting down."
+ENVIRONMENT_MESSAGE = "AstraAi couldn't run this repository in its current environment."
 RESTART_MESSAGE = (
     "The run was stopped because the service restarted while it was working."
 )
@@ -190,7 +211,10 @@ def utc_now() -> datetime:
 
 def safe_error(exc: Exception, stage: RunStage) -> RunError:
     """Describe a failure without leaking internals such as messages or tracebacks."""
-    if isinstance(exc, LLMTimeoutError):
+    if isinstance(exc, RepositoryError):
+        # Written for users, never taken from GitHub.
+        code, message = exc.code, exc.message
+    elif isinstance(exc, LLMTimeoutError):
         code, message = "llm_timeout", "The language model took too long to respond."
     elif isinstance(exc, LLMError):
         code = "llm_failed"
@@ -224,10 +248,21 @@ class RunManager:
         approval_timeout_seconds: float,
         approval_sweep_seconds: float = APPROVAL_SWEEP_SECONDS,
         clock: Callable[[], datetime] = utc_now,
+        develop_graph: CompiledStateGraph | None = None,
     ) -> None:
         if graph.checkpointer is None:
             raise ValueError("RunManager needs a graph compiled with a checkpointer")
+        if (
+            develop_graph is not None
+            and develop_graph.checkpointer is not graph.checkpointer
+        ):
+            raise ValueError("Both graphs must share one checkpointer")
+        # The SOLVE graph; it also owns the checkpointer both graphs share.
         self._graph = graph
+        self._graphs: dict[Mode, CompiledStateGraph | None] = {
+            "solve": graph,
+            "develop": develop_graph,
+        }
         self._context = context
         self._max_active_runs = max_active_runs
         self._max_retained_runs = max_retained_runs
@@ -320,16 +355,28 @@ class RunManager:
 
     async def _paused_for_approval(self, run_id: str) -> bool:
         """Whether the run's checkpoint is paused at the approval interrupt."""
-        state = await self._graph.aget_state({"configurable": {"thread_id": run_id}})
+        state = await self._graph_for(run_id).aget_state(
+            {"configurable": {"thread_id": run_id}}
+        )
         return state.next == ("human_approval",) and bool(state.interrupts)
 
     async def _resume_finished(self, run_id: str) -> bool:
         """Whether the run's checkpoint shows an approved resume that reached the end."""
-        state = await self._graph.aget_state({"configurable": {"thread_id": run_id}})
+        state = await self._graph_for(run_id).aget_state(
+            {"configurable": {"thread_id": run_id}}
+        )
         return not state.next and state.values.get("approval_status") == "approved"
 
-    def submit(self, task: str, language: Language) -> Run:
+    def submit(
+        self,
+        task: str,
+        language: Language,
+        mode: Mode = "solve",
+        repository: str | None = None,
+    ) -> Run:
         """Create a queued run and enqueue it; raise if stopping or nothing fits."""
+        if self._graphs[mode] is None:
+            raise ValueError(f"no graph for {mode} runs")
         if self._stopping:
             raise RunManagerStoppedError
         if self._queue.full():
@@ -341,6 +388,8 @@ class RunManager:
             stage="queued",
             task=task,
             language=language,
+            mode=mode,
+            repository=repository,
             created_at=created,
             updated_at=created,
         )
@@ -499,15 +548,20 @@ class RunManager:
         if self._stopping or run is None or not (run.status == "queued" or resuming):
             return  # Shutting down, forgotten, or already claimed: never run twice.
         # Claim it before the first await, so no other worker can start it too. A new run
-        # reads as analyzing at once: loading its checkpoint must not show running/queued.
+        # reads as its first stage at once: loading its checkpoint must not show
+        # running/queued.
         self._update(
-            run_id, status="running", **({} if resuming else {"stage": "analyzing"})
+            run_id,
+            status="running",
+            **({} if resuming else {"stage": FIRST_STAGES[run.mode]}),
         )
-        graph_input: dict[str, Any] | Command = (
-            Command(resume={"decision": "approve"})
-            if resuming
-            else {"run_id": run_id, "task": run.task, "language": run.language}
-        )
+        graph_input: dict[str, Any] | Command
+        if resuming:
+            graph_input = Command(resume={"decision": "approve"})
+        else:
+            graph_input = {"run_id": run_id, "task": run.task, "language": run.language}
+            if run.mode == "develop":
+                graph_input |= {"mode": run.mode, "repository": run.repository}
         try:
             # Each start or resume gets its own window: waiting for a human is not counted.
             async with asyncio.timeout(self._run_timeout_seconds):
@@ -542,6 +596,8 @@ class RunManager:
                     approval_expires_at=requested_at + self._approval_timeout,
                 )
         finally:
+            # A DEVELOP run's files never outlive its work, however the work ended.
+            self._context.snapshots.pop(run_id, None)
             if self._store.get(run_id).status in FINISHED_STATUSES:
                 await self._graph.checkpointer.adelete_thread(run_id)
 
@@ -550,7 +606,7 @@ class RunManager:
     ) -> dict[str, Any] | None:
         """Drive the graph on the run's own thread; return the approval payload if it pauses."""
         interrupted: dict[str, Any] | None = None
-        async for mode, chunk in self._graph.astream(
+        async for mode, chunk in self._graph_for(run_id).astream(
             graph_input,
             config={"configurable": {"thread_id": run_id}},
             context=self._context,
@@ -592,7 +648,16 @@ class RunManager:
             )
         self._update(run_id, status="failed", stage="failed", error=error)
 
+    def _graph_for(self, run_id: str) -> CompiledStateGraph:
+        graph = self._graphs[self._store.get(run_id).mode]
+        if graph is None:
+            raise ValueError(f"no graph for run {run_id}")
+        return graph
+
     def _finish(self, run_id: str) -> None:
+        if self._store.get(run_id).mode == "develop":
+            self._finish_develop(run_id)
+            return
         result = self._store.get(run_id).execution_result
         if result is not None and result.status == "infrastructure_error":
             # The code never ran, so the run did not complete. Sandbox output here would
@@ -650,6 +715,55 @@ class RunManager:
                 stage="reviewing",
             ),
         )
+
+    def _finish_develop(self, run_id: str) -> None:
+        """A DEVELOP run completes once its existing tests have run, whatever they showed.
+
+        Failing tests are part of the evidence, not a failure of the run. It fails only
+        when the tests couldn't run: no sandbox, or a repository this environment can't
+        run (a missing dependency, a time or resource limit).
+        """
+        result = self._store.get(run_id).existing_tests
+        if result is None or result.status == "infrastructure_error":
+            if result is not None:
+                logger.warning(
+                    "Run %s: sandbox unavailable (%s)", run_id, result.error_type
+                )
+            self._update(
+                run_id,
+                status="failed",
+                stage="failed",
+                existing_tests=(
+                    result.model_copy(update={"stdout": "", "stderr": ""})
+                    if result is not None
+                    else None
+                ),
+                error=RunError(
+                    code="sandbox_unavailable",
+                    message="The tests could not be run because the sandbox is "
+                    "unavailable.",
+                    stage="running_existing_tests",
+                ),
+            )
+            return
+        if result.status in ("timed_out", "resource_exceeded") or (
+            result.error_type == "environment_error"
+        ):
+            logger.warning(
+                "Run %s: existing tests couldn't run (%s)", run_id, result.error_type
+            )
+            self._update(
+                run_id,
+                status="failed",
+                stage="failed",
+                error=RunError(
+                    code="environment_unsupported",
+                    message=ENVIRONMENT_MESSAGE,
+                    stage="running_existing_tests",
+                ),
+            )
+            return
+        self._update(run_id, status="completed", stage="completed")
 
     def _forget_old_runs(self) -> None:
         """Keep storage bounded: drop the oldest finished runs beyond the retention limit.

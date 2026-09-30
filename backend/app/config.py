@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # Sandbox limits, deliberately conservative for a small shared VPS.
     sandbox_python_image: str = Field(default="python:3.12-slim", min_length=1)
     sandbox_cpp_image: str = Field(default="gcc:13", min_length=1)
+    # DEVELOP runs a repository's own tests on Python 3.12 with a pinned pytest and nothing
+    # else; build it from backend/sandbox (see README).
+    sandbox_develop_image: str = Field(
+        default="astraai-sandbox-python:3.12.14-pytest9.1.1", min_length=1
+    )
     sandbox_user: str = Field(default="65534:65534", min_length=1)
     sandbox_timeout_seconds: float = Field(default=30, gt=0, le=300)
     sandbox_cpu_limit: float = Field(default=1.0, gt=0, le=4)
@@ -45,6 +50,9 @@ class Settings(BaseSettings):
     # Durable run records and graph checkpoints (two SQLite files). Must outlive the process,
     # so in a container it is a mounted volume, never the image's own filesystem.
     data_dir: Path = BACKEND_DIR / "data"
+    # Optional, for private repositories only: a read-only token (fine-grained, Contents:
+    # read). Used for api.github.com requests and nothing else; public ones need none.
+    github_token: SecretStr | None = None
 
 
 @lru_cache

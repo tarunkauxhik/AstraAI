@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from app.state import ExecutionResult, GeneratedCode
 
 # Exit code the shell uses when compilation fails, to tell it apart from failing tests.
@@ -52,7 +54,27 @@ LANGUAGES: dict[str, LanguageSpec] = {
 }
 
 
+# A repository's own test suite, run exactly as it is: unpack, then pytest from the root.
+# `python -m` puts the root on sys.path, so a package there imports without installing.
+# Nothing is installed and there is no network, so a missing dependency stops collection.
+REPOSITORY_TMP = f"{SCRATCH_DIR}/.tmp"
+REPOSITORY_COMMAND = (
+    f"cd {SCRATCH_DIR} && tar -x && mkdir -p {REPOSITORY_TMP} && "
+    "exec python -m pytest -q -rfE -p no:cacheprovider"
+)
+# A whole repository lives in the tmpfs, which counts against the memory limit.
+REPOSITORY_SCRATCH_MB = 256
+REPOSITORY_MEMORY_MB = 1024
+# Real test suites start threads, and threads count against the process limit.
+REPOSITORY_PIDS_LIMIT = 256
+REPOSITORY_TIMEOUT_SECONDS = 120
+
+
 class SandboxExecutor(Protocol):
-    """Runs generated code in isolation and reports what happened."""
+    """Runs code in isolation and reports what happened."""
 
     async def execute(self, generated_code: "GeneratedCode") -> "ExecutionResult": ...
+
+    async def run_repository(self, files: "Mapping[str, bytes]") -> "ExecutionResult":
+        """Run a repository's existing tests, unchanged."""
+        ...

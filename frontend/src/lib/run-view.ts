@@ -4,7 +4,7 @@
  */
 import type { ApiError } from "@/api/client"
 import { NETWORK_ERROR_DETAIL } from "@/api/client"
-import type { ErrorCode, ExecutionResult, Run, RunStage } from "@/api/types"
+import type { ErrorCode, ExecutionResult, Run, RunRequest, RunStage } from "@/api/types"
 import { formatCount } from "@/lib/format"
 import { describeFailure, STAGE_ACTIVITY, type FailureKind } from "@/lib/labels"
 
@@ -302,7 +302,14 @@ function clip(text: string, max = 240): string {
 // ---------------------------------------------------------------------------------------
 // Work in progress (derived from the current state only; there is no event history)
 
-export type StepId = "analyze" | "tests" | "solution" | "run" | "review"
+export type StepId =
+  | "analyze"
+  | "tests"
+  | "solution"
+  | "run"
+  | "review"
+  | "repository"
+  | "existing_tests"
 export type StepState = "done" | "current" | "pending"
 
 export interface WorkStep {
@@ -326,6 +333,7 @@ function firstSentence(text: string): string {
  * step back to "current" with what is being fixed; attempt numbers stay in the run log.
  */
 export function workSteps(run: Run): WorkStep[] {
+  if (run.mode === "develop") return developSteps(run)
   const stage = run.stage
   const planned = run.generated_tests?.cases.length ?? null
   const review = run.critic_result
@@ -390,6 +398,47 @@ export function workSteps(run: Run): WorkStep[] {
   return [analyze, tests, solution, runStep, reviewStep]
 }
 
+/**
+ * A repository's own test suite in one phrase: "128 passed", "126 passed · 2 failed", or
+ * that it has none. Nothing here judges whether failing tests are acceptable.
+ */
+export function existingTestsSummary(result: ExecutionResult): string {
+  const passed = result.tests_passed ?? 0
+  const failed = result.tests_failed ?? 0
+  if (result.tests_passed === null && result.tests_failed === null) return "didn't finish"
+  if (passed + failed === 0) return "none found"
+  return failed > 0 ? `${passed} passed · ${failed} failed` : `${passed} passed`
+}
+
+/** DEVELOP: get the repository, then run the tests it already has. */
+function developSteps(run: Run): WorkStep[] {
+  const repository: WorkStep =
+    run.stage === "fetching_repository"
+      ? { id: "repository", state: "current", label: "Getting the repository…" }
+      : run.repository_ref
+        ? { id: "repository", state: "done", label: "Repository ready" }
+        : { id: "repository", state: "pending", label: "Get the repository" }
+  const tests: WorkStep =
+    run.stage === "running_existing_tests"
+      ? { id: "existing_tests", state: "current", label: "Running the existing tests…" }
+      : run.existing_tests
+        ? {
+            id: "existing_tests",
+            state: "done",
+            label: `Existing tests: ${existingTestsSummary(run.existing_tests)}`,
+            problem: run.existing_tests.status !== "passed",
+          }
+        : { id: "existing_tests", state: "pending", label: "Run the existing tests" }
+  return [repository, tests]
+}
+
+/** The request that starts this run again, as it was asked for. */
+export function runRequest(run: Run): RunRequest {
+  return run.mode === "develop" && run.repository !== null
+    ? { task: run.task, language: run.language, mode: "develop", repository: run.repository }
+    : { task: run.task, language: run.language }
+}
+
 // ---------------------------------------------------------------------------------------
 // Endings
 
@@ -397,7 +446,7 @@ export type EndingTone = "success" | "attention" | "neutral"
 export type EndingAction = "copy" | "new_run" | "run_again" | "edit" | "log"
 
 export interface Ending {
-  kind: FailureKind | "accepted" | "expired"
+  kind: FailureKind | "accepted" | "expired" | "checked"
   title: string
   description: string
   tone: EndingTone
@@ -419,7 +468,12 @@ export function workDurationMs(run: Run): number | null {
 
 /** Whether the run log has anything to show yet. */
 export function hasRunLog(run: Run): boolean {
-  return run.execution_result !== null || run.critic_result !== null || run.error !== null
+  return (
+    run.execution_result !== null ||
+    run.critic_result !== null ||
+    run.existing_tests !== null ||
+    run.error !== null
+  )
 }
 
 /** Why a run couldn't be verified, from the evidence that stopped it. */
@@ -439,8 +493,46 @@ function unverifiedDescription(run: Run): string {
   return "AstraAi couldn't confirm that the solution is correct."
 }
 
+/**
+ * DEVELOP, first slice: a completed run has checked the repository. Its tests are reported
+ * as they are; failing ones are evidence, not a verdict on the run.
+ */
+function describeDevelopEnding(run: Run): Ending {
+  if (run.status === "completed") {
+    const result = run.existing_tests
+    const clean = result !== null && result.status === "passed" && (result.tests_passed ?? 0) > 0
+    return {
+      kind: "checked",
+      title: "Repository checked",
+      description: result ? `Existing tests: ${existingTestsSummary(result)}` : "",
+      tone: clean ? "success" : "neutral",
+      actions: ["new_run"],
+      openLog: false,
+    }
+  }
+  const failure = describeFailure(run.error)
+  switch (failure.kind) {
+    case "repository":
+      return { ...failure, tone: "neutral", actions: ["edit", "new_run"], openLog: false }
+    case "environment":
+      // The run log says what stopped the tests, so it opens by itself.
+      return { ...failure, tone: "attention", actions: ["log", "new_run"], openLog: true }
+    case "sandbox":
+      return {
+        ...failure,
+        description: "AstraAi couldn't start the test sandbox, so the tests haven't run.",
+        tone: "neutral",
+        actions: ["run_again"],
+        openLog: false,
+      }
+    default:
+      return { ...failure, tone: "neutral", actions: ["run_again"], openLog: false }
+  }
+}
+
 /** How a finished run is presented: one title, one sentence, and the ways forward. */
 export function describeEnding(run: Run): Ending {
+  if (run.mode === "develop") return describeDevelopEnding(run)
   if (run.status === "completed") {
     return {
       kind: "accepted",

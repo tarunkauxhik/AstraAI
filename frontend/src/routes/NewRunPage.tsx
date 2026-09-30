@@ -4,13 +4,15 @@ import { Loader2, WifiOff } from "lucide-react"
 import { useLocation, useNavigate } from "react-router"
 
 import { api } from "@/api/client"
-import { TASK_MAX_LENGTH, type Language } from "@/api/types"
+import { TASK_MAX_LENGTH, type Language, type Mode } from "@/api/types"
 import { Brand } from "@/components/Brand"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useCreateRun } from "@/hooks/useCreateRun"
+import { parseRepository } from "@/lib/repository"
 import { cn } from "@/lib/utils"
 
 /** The counter only appears once the task is long enough for the limit to matter. */
@@ -39,11 +41,16 @@ function rememberLanguage(language: Language) {
 const SUBMIT_HINT =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ ↵" : "Ctrl ↵"
 
-/** "Edit task" on a finished run opens this page with that run's task and language. */
+/** "Edit task" on a finished run opens this page with that run's request. */
 interface Prefill {
   task?: string
   language?: Language
+  mode?: Mode
+  repository?: string
 }
+
+const CHOICE =
+  "h-11 px-4 data-[state=on]:border-brand/60 data-[state=on]:bg-brand/10 data-[state=on]:text-foreground sm:h-9"
 
 /** Says nothing while the service is reachable; only an outage is worth the space. */
 function ServiceWarning() {
@@ -69,12 +76,17 @@ export function NewRunPage() {
   const createRun = useCreateRun()
   const [task, setTask] = useState(prefill.task ?? "")
   const [language, setLanguage] = useState<Language>(() => prefill.language ?? rememberedLanguage())
+  const [mode, setMode] = useState<Mode>(prefill.mode ?? "solve")
+  const [repository, setRepository] = useState(prefill.repository ?? "")
   const [attempted, setAttempted] = useState(false)
+  const develop = mode === "develop"
   const textarea = useRef<HTMLTextAreaElement>(null)
   const taskId = useId()
   const hintId = useId()
   const counterId = useId()
   const errorId = useId()
+  const repositoryId = useId()
+  const repositoryErrorId = useId()
 
   // Ready to type on desktop; not on touch screens, where focus would pop up the keyboard.
   useEffect(() => {
@@ -89,7 +101,9 @@ export function NewRunPage() {
   const length = [...task.trim()].length
   const localError =
     length === 0
-      ? "Describe what you want AstraAi to solve."
+      ? develop
+        ? "Describe what you want changed."
+        : "Describe what you want AstraAi to solve."
       : length > TASK_MAX_LENGTH
         ? `The task is too long: ${length.toLocaleString()} of ${TASK_MAX_LENGTH.toLocaleString()} characters.`
         : null
@@ -97,14 +111,37 @@ export function NewRunPage() {
   // An empty box isn't an error until the user tries to run it; an over-long one is at once.
   const taskError =
     (localError && (attempted || length > TASK_MAX_LENGTH) ? localError : null) ?? serverFieldError ?? null
-  const generalError = createRun.error && !serverFieldError ? createRun.error : null
+  // Mirrors the backend's address rules; the server rechecks and never fetches anything else.
+  const localRepositoryError = !develop
+    ? null
+    : parseRepository(repository) !== null
+      ? null
+      : repository.trim()
+        ? "Enter a GitHub repository, like https://github.com/owner/name."
+        : "Enter a GitHub repository."
+  const serverRepositoryError = createRun.error?.fieldErrors.find(
+    (item) => item.field === "repository",
+  )?.message
+  const repositoryError = (attempted ? localRepositoryError : null) ?? serverRepositoryError ?? null
+  const generalError =
+    createRun.error && !serverFieldError && !serverRepositoryError ? createRun.error : null
   const showCounter = length >= COUNTER_THRESHOLD
 
   function submit(event?: FormEvent) {
     event?.preventDefault()
     setAttempted(true)
-    if (localError || createRun.isPending) return
-    createRun.mutate({ task, language }, { onSuccess: (accepted) => navigate(`/runs/${accepted.run_id}`) })
+    if (localError || localRepositoryError || createRun.isPending) return
+    const request = develop
+      ? { task, language: "python" as const, mode, repository: repository.trim() }
+      : { task, language }
+    createRun.mutate(request, { onSuccess: (accepted) => navigate(`/runs/${accepted.run_id}`) })
+  }
+
+  function chooseMode(value: string) {
+    if (value !== "solve" && value !== "develop") return
+    setMode(value)
+    setAttempted(false)
+    createRun.reset()
   }
 
   function chooseLanguage(value: string) {
@@ -113,7 +150,9 @@ export function NewRunPage() {
     rememberLanguage(value)
   }
 
-  const describedBy = [hintId, showCounter && counterId, taskError && errorId].filter(Boolean).join(" ")
+  const describedBy = [!develop && hintId, showCounter && counterId, taskError && errorId]
+    .filter(Boolean)
+    .join(" ")
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-2xl flex-col px-4 pb-10 sm:px-6">
@@ -124,16 +163,34 @@ export function NewRunPage() {
       <main className="flex-1 pt-8 sm:pt-20">
         <ServiceWarning />
         <form onSubmit={submit} noValidate className="space-y-5">
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            value={mode}
+            onValueChange={chooseMode}
+            aria-label="What AstraAi does"
+            className="w-full sm:w-auto"
+          >
+            <ToggleGroupItem value="solve" className={cn(CHOICE, "flex-1 sm:flex-none")}>
+              Solve a coding problem
+            </ToggleGroupItem>
+            <ToggleGroupItem value="develop" className={cn(CHOICE, "flex-1 sm:flex-none")}>
+              Develop a repository
+            </ToggleGroupItem>
+          </ToggleGroup>
+
           <div className="space-y-2">
             <h1>
               <label htmlFor={taskId} className="text-2xl font-semibold tracking-tight">
-                What do you want AstraAi to solve?
+                {develop ? "What do you want changed?" : "What do you want AstraAi to solve?"}
               </label>
             </h1>
-            <p id={hintId} className="text-muted-foreground">
-              Describe one self-contained function. AstraAi writes tests and code, runs the tests,
-              and asks you to review the result.
-            </p>
+            {!develop && (
+              <p id={hintId} className="text-muted-foreground">
+                Describe one self-contained function. AstraAi writes tests and code, runs the
+                tests, and asks you to review the result.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -145,7 +202,11 @@ export function NewRunPage() {
               onKeyDown={(event) => {
                 if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) submit()
               }}
-              placeholder="For example: write a function that returns the indices of the two numbers in a list that add up to a target."
+              placeholder={
+                develop
+                  ? "For example: add a --json flag to the report command."
+                  : "For example: write a function that returns the indices of the two numbers in a list that add up to a target."
+              }
               rows={8}
               aria-invalid={taskError ? true : undefined}
               aria-describedby={describedBy}
@@ -171,6 +232,31 @@ export function NewRunPage() {
             )}
           </div>
 
+          {develop && (
+            <div className="space-y-2">
+              <label htmlFor={repositoryId} className="text-sm font-medium">
+                Repository
+              </label>
+              <Input
+                id={repositoryId}
+                value={repository}
+                onChange={(event) => setRepository(event.target.value)}
+                placeholder="https://github.com/owner/name"
+                inputMode="url"
+                autoComplete="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                aria-invalid={repositoryError ? true : undefined}
+                aria-describedby={repositoryError ? repositoryErrorId : undefined}
+              />
+              {repositoryError && (
+                <p id={repositoryErrorId} className="text-sm text-destructive">
+                  {repositoryError}
+                </p>
+              )}
+            </div>
+          )}
+
           {generalError && (
             <Alert variant="destructive">
               <AlertTitle>{generalError.status === 429 ? "AstraAi is busy" : "Couldn't start the run"}</AlertTitle>
@@ -181,27 +267,28 @@ export function NewRunPage() {
             </Alert>
           )}
 
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <ToggleGroup
-              type="single"
-              variant="outline"
-              value={language}
-              onValueChange={chooseLanguage}
-              aria-label="Language"
-            >
-              <ToggleGroupItem
-                value="python"
-                className="h-11 px-4 data-[state=on]:border-brand/60 data-[state=on]:bg-brand/10 data-[state=on]:text-foreground sm:h-9"
+          <div
+            className={cn(
+              "flex flex-col gap-3 sm:flex-row sm:items-center",
+              develop ? "sm:justify-end" : "sm:justify-between",
+            )}
+          >
+            {!develop && (
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                value={language}
+                onValueChange={chooseLanguage}
+                aria-label="Language"
               >
-                Python
-              </ToggleGroupItem>
-              <ToggleGroupItem
-                value="cpp"
-                className="h-11 px-4 data-[state=on]:border-brand/60 data-[state=on]:bg-brand/10 data-[state=on]:text-foreground sm:h-9"
-              >
-                C++
-              </ToggleGroupItem>
-            </ToggleGroup>
+                <ToggleGroupItem value="python" className={CHOICE}>
+                  Python
+                </ToggleGroupItem>
+                <ToggleGroupItem value="cpp" className={CHOICE}>
+                  C++
+                </ToggleGroupItem>
+              </ToggleGroup>
+            )}
             <Button
               type="submit"
               size="lg"
@@ -210,7 +297,7 @@ export function NewRunPage() {
               className="h-11 w-full px-5 sm:h-9 sm:w-auto"
             >
               {createRun.isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
-              {createRun.isPending ? "Starting…" : "Solve"}
+              {createRun.isPending ? "Starting…" : develop ? "Start" : "Solve"}
               {!createRun.isPending && (
                 <kbd
                   aria-hidden="true"

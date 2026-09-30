@@ -19,6 +19,8 @@ def app_startup(
 ) -> None:
     """Keep app startup away from real data and, outside `docker` tests, real containers."""
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    # A token in the developer's environment must never reach a test's GitHub requests.
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     if not request.node.get_closest_marker("docker"):
         monkeypatch.setattr("app.main.DockerSandbox", StartupSandbox)
 

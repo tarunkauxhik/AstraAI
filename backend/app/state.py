@@ -1,11 +1,16 @@
-from dataclasses import dataclass
-from typing import Literal, NotRequired, Self, TypedDict
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal, NotRequired, Self, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.llm import LLMClient
 from app.sandbox.executor import SandboxExecutor
 
+if TYPE_CHECKING:
+    from app.github import GitHubProvider
+
+# solve: write a function from scratch. develop: work in an existing GitHub repository.
+Mode = Literal["solve", "develop"]
 Language = Literal["python", "cpp"]
 ExecutionStatus = Literal[
     "passed",
@@ -212,6 +217,16 @@ class RevisedTests(BaseModel):
 ApprovalStatus = Literal["pending", "approved", "rejected", "expired"]
 
 
+class RepositoryRef(BaseModel):
+    """The exact repository version a DEVELOP run works on: its default branch, pinned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str
+    default_branch: str
+    commit_sha: str
+
+
 class ApprovalDecision(BaseModel):
     """A human's answer to an approval request. Nothing else is accepted."""
 
@@ -247,6 +262,13 @@ class AgentState(TypedDict):
     run_id: str
     task: str
     language: Language
+    mode: NotRequired[Mode]
+    # DEVELOP: owner/name as asked for, then the version resolved from it. The files
+    # themselves never enter the state; they live in GraphContext.snapshots.
+    repository: NotRequired[str]
+    repository_ref: NotRequired[RepositoryRef]
+    # DEVELOP: the repository's own test suite, run as-is before any change.
+    existing_tests: NotRequired[ExecutionResult]
     requirements: NotRequired[Requirements]
     generated_tests: NotRequired[GeneratedTests]
     generated_code: NotRequired[GeneratedCode]
@@ -266,3 +288,7 @@ class GraphContext:
 
     llm: LLMClient
     sandbox: SandboxExecutor
+    github: "GitHubProvider | None" = None
+    # Each DEVELOP run's repository files, by run id, for as long as the run is working.
+    # Never checkpointed: the run manager drops a run's entry whenever it stops working.
+    snapshots: dict[str, dict[str, bytes]] = field(default_factory=dict)

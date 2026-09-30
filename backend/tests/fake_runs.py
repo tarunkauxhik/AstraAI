@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 from langgraph.graph.state import CompiledStateGraph
 
 from app.config import Settings, get_settings
-from app.graph import build_checkpointer, build_graph
+from app.github import GitHubProvider
+from app.graph import build_checkpointer, build_develop_graph, build_graph
 from app.llm import LLMClient
 from app.runs import Run, RunManager
 from app.sandbox.executor import SandboxExecutor
@@ -105,6 +106,7 @@ def manager_factory(
     reply: Reply = WORKFLOW_REPLIES,
     sandbox: Callable[[], SandboxExecutor] = FakeSandbox,
     *,
+    github: Callable[[], GitHubProvider] | None = None,
     max_queued_runs: int = 10,
     **options: Any,
 ) -> Callable[[Settings, GraphContext], RunManager]:
@@ -117,8 +119,13 @@ def manager_factory(
         graph, store = storage(settings.data_dir)
         return RunManager(
             graph,
-            GraphContext(llm=fake_llm(reply), sandbox=sandbox()),
+            GraphContext(
+                llm=fake_llm(reply),
+                sandbox=sandbox(),
+                github=github() if github is not None else None,
+            ),
             store,
+            develop_graph=build_develop_graph(graph.checkpointer),
             max_active_runs=1,
             max_queued_runs=max_queued_runs,
             max_retained_runs=100,

@@ -51,7 +51,11 @@ function TaskTitle({ run }: { run: Run }) {
         {run.task}
       </h1>
       <p className="mt-1.5 flex flex-wrap items-center gap-x-2 text-sm text-muted-foreground">
-        <span>{LANGUAGE_LABELS[run.language]}</span>
+        <span>
+          {run.mode === "develop"
+            ? (run.repository_ref?.full_name ?? run.repository)
+            : LANGUAGE_LABELS[run.language]}
+        </span>
         {(clamped || expanded) && (
           <>
             <span aria-hidden="true">·</span>
@@ -91,7 +95,10 @@ function RunView({ run, connectionError }: { run: Run; connectionError: ApiError
   const logOpen = logChoice ?? (isTerminal(run) && describeEnding(run).openLog)
   const [revealLog, setRevealLog] = useState(0)
   // An ending with nothing to show reads as one column; work in progress keeps its place.
-  const beside = run.generated_tests !== null || run.generated_code !== null || !isTerminal(run)
+  // A DEVELOP check has no solution or tests to show beside it, so it is always one column.
+  const beside =
+    run.mode === "solve" &&
+    (run.generated_tests !== null || run.generated_code !== null || !isTerminal(run))
 
   useEffect(() => {
     if (revealLog > 0) reveal("run-log", "#run-log summary")

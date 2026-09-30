@@ -58,7 +58,16 @@ function attemptTitle(name: string, run: Run, freshness: Freshness) {
   )
 }
 
-function Execution({ result, historical }: { result: ExecutionResult; historical: boolean }) {
+function Execution({
+  result,
+  historical,
+  unavailable = "The sandbox couldn't run the code, so this says nothing about whether the solution is correct.",
+}: {
+  result: ExecutionResult
+  historical: boolean
+  /** What an unavailable sandbox means for this result. */
+  unavailable?: string
+}) {
   const infrastructure = result.status === "infrastructure_error"
   const failing = result.status !== "passed"
   const errorType = executionErrorTypeLabel(result.error_type)
@@ -89,10 +98,7 @@ function Execution({ result, historical }: { result: ExecutionResult; historical
         )}
       </Facts>
       {infrastructure ? (
-        <p className="text-sm text-muted-foreground">
-          The sandbox couldn't run the code, so this says nothing about whether the solution is
-          correct.
-        </p>
+        <p className="text-sm text-muted-foreground">{unavailable}</p>
       ) : (
         <div className="space-y-2">
           {result.stdout && (
@@ -200,6 +206,15 @@ export function RunLog({
                 : `Attempt ${attempts} didn't finish. The results below are from the previous attempt.`}
             </p>
           )}
+          {run.existing_tests && (
+            <Part title="Existing tests">
+              <Execution
+                result={run.existing_tests}
+                historical={false}
+                unavailable="The sandbox couldn't run the tests, so there is no result."
+              />
+            </Part>
+          )}
           {execution && (
             <Part title={attemptTitle("Test run", run, execution)}>
               <Execution result={run.execution_result!} historical={execution === "stale"} />
@@ -223,9 +238,11 @@ export function RunLog({
           )}
           <Part title="Run">
             <Facts>
-              <Fact label="Attempts">
-                {fixesAndRetries.length > 0 ? `${attempts} (${fixesAndRetries.join(", ")})` : attempts}
-              </Fact>
+              {run.mode === "solve" && (
+                <Fact label="Attempts">
+                  {fixesAndRetries.length > 0 ? `${attempts} (${fixesAndRetries.join(", ")})` : attempts}
+                </Fact>
+              )}
               <Fact label="Started">{formatDateTime(run.created_at)}</Fact>
               {isTerminal(run) && <Fact label="Ended">{formatDateTime(run.updated_at)}</Fact>}
               {worked !== null && <Fact label="AstraAi's work">{formatSpan(worked)}</Fact>}

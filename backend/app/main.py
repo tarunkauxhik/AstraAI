@@ -4,11 +4,14 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, StringConstraints, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from app.config import Settings, get_settings
-from app.graph import build_checkpointer, build_graph
+from app.github import GitHub
+from app.graph import build_checkpointer, build_develop_graph, build_graph
 from app.llm import LLMClient
+from app.repository import parse_repository
 from app.runs import (
     ApprovalConflictError,
     ApprovalExpiredError,
@@ -20,7 +23,7 @@ from app.runs import (
     RunStatus,
 )
 from app.sandbox.docker import DockerSandbox
-from app.state import ApprovalDecision, GraphContext, Language
+from app.state import ApprovalDecision, GraphContext, Language, Mode
 from app.store import RunStore
 
 
@@ -34,6 +37,38 @@ class RunRequest(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)
     ]
     language: Language
+    # Omitted, a run is SOLVE, as before. DEVELOP needs a repository.
+    mode: Mode = "solve"
+    repository: str | None = None
+
+    @field_validator("repository")
+    @classmethod
+    def a_github_repository(cls, value: str | None) -> str | None:
+        """Normalized to owner/name; any other address is refused, never fetched."""
+        if value is None:
+            return None
+        try:
+            return parse_repository(value)
+        except ValueError:
+            raise PydanticCustomError(
+                "repository",
+                "Enter a GitHub repository, like https://github.com/owner/name.",
+            ) from None
+
+    @model_validator(mode="after")
+    def a_repository_only_for_develop(self) -> "RunRequest":
+        if self.mode == "develop":
+            if self.repository is None:
+                raise PydanticCustomError("repository", "Enter a GitHub repository.")
+            if self.language != "python":
+                raise PydanticCustomError(
+                    "language", "Develop works with Python repositories."
+                )
+        elif self.repository is not None:
+            raise PydanticCustomError(
+                "repository", "Only Develop runs take a repository."
+            )
+        return self
 
 
 class RunAccepted(BaseModel):
@@ -49,8 +84,9 @@ class ApprovalExtended(BaseModel):
 def build_run_manager(settings: Settings, context: GraphContext) -> RunManager:
     """The run manager on durable storage in settings.data_dir; it closes both on stop."""
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    checkpointer = build_checkpointer(settings.data_dir / "checkpoints.sqlite3")
     return RunManager(
-        build_graph(build_checkpointer(settings.data_dir / "checkpoints.sqlite3")),
+        build_graph(checkpointer),
         context,
         RunStore(settings.data_dir / "runs.sqlite3"),
         max_active_runs=settings.run_max_active_runs,
@@ -58,6 +94,7 @@ def build_run_manager(settings: Settings, context: GraphContext) -> RunManager:
         max_retained_runs=settings.run_max_retained_runs,
         run_timeout_seconds=settings.run_timeout_seconds,
         approval_timeout_seconds=settings.approval_timeout_seconds,
+        develop_graph=build_develop_graph(checkpointer),
     )
 
 
@@ -67,7 +104,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     llm = LLMClient(settings)
     sandbox = DockerSandbox(settings)
-    runs = build_run_manager(settings, GraphContext(llm=llm, sandbox=sandbox))
+    github = GitHub(settings.github_token)
+    runs = build_run_manager(
+        settings, GraphContext(llm=llm, sandbox=sandbox, github=github)
+    )
     app.state.runs = runs
     # Before recovery: an execution interrupted by a crash must not keep running.
     await sandbox.remove_leftovers()
@@ -77,6 +117,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await runs.stop()
         await llm.close()
+        await github.close()
 
 
 app = FastAPI(title="AstraAi", lifespan=lifespan)
@@ -129,7 +170,7 @@ async def create_run(
     run: RunRequest, runs: Annotated[RunManager, Depends(get_run_manager)]
 ) -> RunAccepted:
     try:
-        created = runs.submit(run.task, run.language)
+        created = runs.submit(run.task, run.language, run.mode, run.repository)
     except QueueFullError as exc:
         raise queue_full() from exc
     except RunManagerStoppedError as exc:

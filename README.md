@@ -63,6 +63,7 @@ Fill in `backend/.env`:
 | `LLM_MAX_CONCURRENCY` | Optional. LLM requests in flight at once per process, 1-8 (2) |
 | `APPROVAL_TIMEOUT_SECONDS` | Optional. Seconds a verified solution waits for a human decision (restartable with more time) before the run expires, 5-86400 (600) |
 | `DATA_DIR` | Optional. Directory for the run and checkpoint databases (`backend/data`) |
+| `GITHUB_TOKEN` | Optional. Only for private repositories in Develop: a read-only fine-grained token (Contents: read). Public repositories need none |
 
 Run lifecycle and sandbox limits are listed, with defaults, in `backend/.env.example`.
 
@@ -104,7 +105,7 @@ Supported languages: `python`, `cpp`.
 | Endpoint | Status | Meaning |
 | -------- | ------ | ------- |
 | `POST /runs` | 202 | Accepted: `{"run_id", "status": "queued"}` |
-| `POST /runs` | 422 | Invalid request: missing/blank task, unsupported language |
+| `POST /runs` | 422 | Invalid request: missing/blank task, unsupported language, or a Develop run without a GitHub repository |
 | `POST /runs` | 429 | Queue full (`Retry-After: 30`) |
 | `GET /runs/{run_id}` | 200 | The run, with whatever results exist so far |
 | `GET /runs/{run_id}` | 404 | Unknown run |
@@ -150,6 +151,45 @@ next queued run starts. On shutdown the service stops accepting runs (`POST` ret
 the active run is cancelled, failing with `shutdown`, and its container removed before the
 process exits, unless it was resuming an approved run: queued, approval-waiting and
 approved runs are all left for the next start.
+
+## Develop (first slice)
+
+`POST /runs` with `"mode": "develop"` and a `"repository"` (a GitHub URL or `owner/name`)
+checks an existing Python repository instead of writing a function:
+
+```bash
+curl -X POST http://127.0.0.1:8000/runs \
+  -H "Content-Type: application/json" \
+  -d '{"task": "Add a --json flag.", "language": "python", "mode": "develop", "repository": "https://github.com/owner/name"}'
+```
+
+AstraAi resolves the repository's default branch to its current commit, downloads the
+repository at exactly that commit, and runs its existing test suite as-is with
+`python -m pytest` in the sandbox. The run then carries `repository_ref` (the pinned
+version) and `existing_tests` (the result, failing tests included) and ends `completed`,
+or `failed` when the repository can't be fetched (`repository_not_public`,
+`repository_not_found`, `repository_empty`, `repository_too_large`,
+`repository_unsupported`, `github_unavailable`) or its tests can't run here
+(`environment_unsupported`: usually a dependency, since nothing is installed). No code is
+changed and nothing is written to GitHub yet.
+
+- **Repository data is untrusted.** The archive is read in memory, never extracted to
+  disk: regular files only, no links or devices, no absolute or `..` paths, at most 20 MB
+  downloaded, 64 MB unpacked and 10,000 files. It reaches the sandbox only as a tar on
+  stdin, and is dropped as soon as the run stops working. It never enters run state or
+  checkpoints.
+- **GitHub access is read-only.** Public repositories need no token. `GITHUB_TOKEN`, if
+  set, is sent to `api.github.com` only: never to the download redirect, the sandbox, the
+  model, run state, checkpoints or logs.
+- **The sandbox image** is Python 3.12 with a pinned pytest and nothing else. Build it once;
+  only the build uses the network:
+
+  ```bash
+  docker build -t astraai-sandbox-python:3.12.14-pytest9.1.1 backend/sandbox
+  ```
+
+  Tests run with the usual sandbox restrictions (no network, read-only root, no
+  capabilities, non-root), 1 GB of memory, a 256 MB tmpfs and a 120-second limit.
 
 ## Durability
 
@@ -271,6 +311,7 @@ Opt-in checks. The Docker suite needs the local daemon and the sandbox images:
 ```bash
 ASTRAAI_DOCKER_TESTS=1 uv run pytest tests/test_sandbox_docker.py
 ASTRAAI_E2E_TESTS=1 uv run pytest tests/test_runs_e2e.py   # lifecycle over HTTP, fakes
+ASTRAAI_LIVE_GITHUB=1 uv run pytest tests/test_github_live.py  # real GitHub, public repo, no token
 ```
 
 Opt-in check of the whole workflow against the real endpoint in `.env`:

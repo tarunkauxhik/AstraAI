@@ -3,6 +3,7 @@
 import asyncio
 import io
 import tarfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from app.state import ExecutionResult, GeneratedCode
@@ -17,18 +18,40 @@ PASSED = ExecutionResult(
 )
 
 
+# What pytest reports for a repository whose one test passes.
+TESTS_PASSED = ExecutionResult(
+    status="passed",
+    exit_code=0,
+    stdout="tests/test_add.py .\n1 passed in 0.01s\n",
+    tests_passed=1,
+    tests_failed=0,
+)
+
+
 class FakeSandbox:
     """Executor stub: records what it was asked to run and replays one result."""
 
-    def __init__(self, result: ExecutionResult | Exception = PASSED) -> None:
+    def __init__(
+        self,
+        result: ExecutionResult | Exception = PASSED,
+        repository_result: ExecutionResult | Exception = TESTS_PASSED,
+    ) -> None:
         self._result = result
+        self._repository_result = repository_result
         self.calls: list[GeneratedCode] = []
+        self.repositories: list[dict[str, bytes]] = []
 
     async def execute(self, generated_code: GeneratedCode) -> ExecutionResult:
         self.calls.append(generated_code)
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
+
+    async def run_repository(self, files: Mapping[str, bytes]) -> ExecutionResult:
+        self.repositories.append(dict(files))
+        if isinstance(self._repository_result, Exception):
+            raise self._repository_result
+        return self._repository_result
 
 
 class FakeStream:

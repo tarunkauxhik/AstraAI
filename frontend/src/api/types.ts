@@ -8,6 +8,9 @@
 
 export type Language = "python" | "cpp"
 
+/** solve: write a function from scratch. develop: work in an existing GitHub repository. */
+export type Mode = "solve" | "develop"
+
 export type RunStatus =
   | "queued"
   | "running"
@@ -26,6 +29,8 @@ export type RunStage =
   | "reviewing"
   | "revising_code"
   | "revising_tests"
+  | "fetching_repository"
+  | "running_existing_tests"
   | "waiting_for_approval"
   | "resuming"
   | "completed"
@@ -78,6 +83,13 @@ export const KNOWN_ERROR_CODES = [
   "revision_budget_exhausted",
   "retry_budget_exhausted",
   "approval_rejected",
+  "repository_not_found",
+  "repository_not_public",
+  "repository_empty",
+  "github_unavailable",
+  "repository_too_large",
+  "repository_unsupported",
+  "environment_unsupported",
 ] as const
 
 export type KnownErrorCode = (typeof KNOWN_ERROR_CODES)[number]
@@ -92,6 +104,7 @@ export type ExecutionErrorType =
   | "runtime_error"
   | "timeout"
   | "out_of_memory"
+  | "environment_error"
   | "container_create_failed"
   | "container_start_failed"
   | "container_inspect_failed"
@@ -164,6 +177,13 @@ export interface ApprovalRequest {
   approval_means: string
 }
 
+/** The exact repository version a DEVELOP run works on. Internal: never shown as such. */
+export interface RepositoryRef {
+  full_name: string
+  default_branch: string
+  commit_sha: string
+}
+
 export interface RunError {
   code: ErrorCode
   message: string
@@ -177,6 +197,11 @@ export interface Run {
   stage: RunStage
   task: string
   language: Language
+  mode: Mode
+  /** DEVELOP: owner/name as submitted, the version it resolved to, and its own tests. */
+  repository: string | null
+  repository_ref: RepositoryRef | null
+  existing_tests: ExecutionResult | null
   created_at: string
   updated_at: string
   requirements: Requirements | null
@@ -199,6 +224,9 @@ export interface Run {
 export interface RunRequest {
   task: string
   language: Language
+  /** Omitted, a run is SOLVE. DEVELOP needs a repository. */
+  mode?: Mode
+  repository?: string
 }
 
 /** Response of POST /runs (status "queued") and POST /runs/{id}/approval. */
