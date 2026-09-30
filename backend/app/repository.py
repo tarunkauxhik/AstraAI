@@ -8,6 +8,7 @@ import io
 import re
 import tarfile
 import zlib
+from fnmatch import fnmatch
 from urllib.parse import urlsplit
 
 # Bounds on what one run may hold in memory and hand to the sandbox.
@@ -24,6 +25,45 @@ GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
 
 Snapshot = dict[str, bytes]
 
+# Paths AstraAi never changes and never shows the model: CI, credentials, deployment and
+# infrastructure. A plain list on purpose; anything it misses is still only a proposed diff.
+PROTECTED_DIRECTORIES = frozenset(
+    {
+        ".github",
+        ".gitlab",
+        ".circleci",
+        "k8s",
+        "kubernetes",
+        "helm",
+        "terraform",
+        "infra",
+    }
+)
+PROTECTED_NAMES = (
+    ".env*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa*",
+    "id_ed25519*",
+    "*secret*",
+    "*credential*",
+    ".netrc",
+    ".pypirc",
+    "dockerfile*",
+    "containerfile*",
+    "*compose*.yml",
+    "*compose*.yaml",
+    ".gitlab-ci.yml",
+    ".travis.yml",
+    "azure-pipelines.yml",
+    "jenkinsfile",
+    "*.tf",
+    "*.tfvars",
+    "procfile",
+)
+
 MESSAGES = {
     "repository_not_found": "AstraAi couldn't find this repository, or doesn't have access "
     "to it.",
@@ -35,6 +75,10 @@ MESSAGES = {
     "repository_too_large": "This repository is larger than AstraAi can check right now.",
     "repository_unsupported": "This repository contains files AstraAi can't safely handle "
     "yet, such as symbolic links.",
+    "no_relevant_files": "AstraAi couldn't find the code this task is about.",
+    "no_changes": "AstraAi didn't find anything to change for this task.",
+    "changes_not_applied": "AstraAi's changes didn't match the repository exactly, so "
+    "nothing was changed.",
 }
 
 
@@ -88,6 +132,14 @@ def safe_path(path: str) -> bool:
     if not path or path.startswith("/") or "\x00" in path or "\\" in path:
         return False
     return all(part not in ("", ".", "..") for part in path.split("/"))
+
+
+def protected(path: str) -> bool:
+    """CI, credentials, deployment or infrastructure: never shown to the model or changed."""
+    *directories, name = path.lower().split("/")
+    return bool(PROTECTED_DIRECTORIES & set(directories)) or any(
+        fnmatch(name, pattern) for pattern in PROTECTED_NAMES
+    )
 
 
 def read_archive(data: bytes) -> Snapshot:

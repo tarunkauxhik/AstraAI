@@ -17,7 +17,7 @@ from tests.fake_llm import (
     ScriptedReplies,
     fake_llm,
 )
-from tests.fake_sandbox import FakeDockerCli
+from tests.fake_sandbox import FakeDockerCli, FakeProcess
 from tests.graph_runs import checkpointed_graph, start
 
 PYTHON_CODE = GeneratedCode.model_validate(VALID_PYTHON_CODE)
@@ -597,3 +597,33 @@ def test_limits_mean_the_suite_did_not_finish() -> None:
         "resource_exceeded",
         None,
     )
+
+
+class SilentProcess(FakeProcess):
+    """A docker CLI call that never answers: the daemon has gone away."""
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        await asyncio.Event().wait()
+        return b"", b""
+
+
+def test_a_docker_call_that_never_answers_is_an_infrastructure_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes: list[SilentProcess] = []
+
+    async def silent(program: str, *args: str, **kwargs: object) -> SilentProcess:
+        processes.append(SilentProcess())
+        return processes[-1]
+
+    monkeypatch.setattr("app.sandbox.docker.DOCKER_CLI_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("app.sandbox.docker.asyncio.create_subprocess_exec", silent)
+
+    result = asyncio.run(DockerSandbox(Settings()).run_repository({"test_x.py": b""}))
+
+    assert (result.status, result.error_type) == (
+        "infrastructure_error",
+        "container_create_failed",
+    )
+    # The stuck create was killed, and cleanup's own call was bounded too.
+    assert len(processes) == 2 and all(process.killed for process in processes)

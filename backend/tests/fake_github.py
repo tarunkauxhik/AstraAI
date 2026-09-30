@@ -63,3 +63,38 @@ class FakeGitHub:
 
 def snapshot(files: dict[str, bytes] = SAMPLE_FILES) -> dict[str, bytes]:
     return read_archive(make_archive(files))
+
+
+# DEVELOP's model replies for SAMPLE_FILES: add a sub function beside add, with a test.
+PLAN = {
+    "summary": "Add a sub function next to add, and a test for it.",
+    "files": ["sample/__init__.py", "tests/test_add.py"],
+}
+EDITS = {
+    "edits": [
+        {
+            "path": "sample/__init__.py",
+            "old": "    return a + b\n",
+            "new": "    return a + b\n\n\ndef sub(a, b):\n    return a - b\n",
+        },
+        {
+            "path": "tests/test_add.py",
+            "old": "    assert add(1, 2) == 3\n",
+            "new": "    assert add(1, 2) == 3\n\n\ndef test_sub():\n"
+            "    from sample import sub\n\n    assert sub(3, 1) == 2\n",
+        },
+    ],
+    "explanation": "Adds sub next to add, with a test.",
+}
+REVIEW_PASS = {
+    "verdict": "pass",
+    "reason": "sub does what was asked and its new test passes.",
+    "code_issue": "",
+    "test_issue": "",
+    "recommended_action": "accept",
+}
+DEVELOP_REPLIES = {
+    "ChangePlan": PLAN,
+    "CodeChanges": EDITS,
+    "CriticResult": REVIEW_PASS,
+}

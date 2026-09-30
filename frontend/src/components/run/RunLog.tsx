@@ -176,8 +176,9 @@ export function RunLog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const execution = executionFreshness(run)
-  const review = criticFreshness(run)
+  const solve = run.mode === "solve"
+  const execution = solve ? executionFreshness(run) : null
+  const review = solve ? criticFreshness(run) : null
   const stale = execution === "stale" || review === "stale"
   const attempts = executionAttempt(run)
   const fixesAndRetries = [
@@ -213,6 +214,33 @@ export function RunLog({
                 historical={false}
                 unavailable="The sandbox couldn't run the tests, so there is no result."
               />
+            </Part>
+          )}
+          {run.verification && (
+            <Part title="Tests after the changes">
+              <Execution
+                result={run.verification}
+                historical={false}
+                unavailable="The sandbox couldn't run the tests, so they say nothing about the changes."
+              />
+            </Part>
+          )}
+          {!solve && run.critic_result && (
+            <Part title="AI review">
+              {/* A repair follows by fixed rules, so the recommendation isn't shown. */}
+              <Review run={run} review={run.critic_result} historical />
+            </Part>
+          )}
+          {!solve && run.first_attempt && (
+            <Part title="Before the fix">
+              <div className="space-y-4">
+                <Execution
+                  result={run.first_attempt.verification}
+                  historical
+                  unavailable="The sandbox couldn't run the tests."
+                />
+                <Review run={run} review={run.first_attempt.review} historical />
+              </div>
             </Part>
           )}
           {execution && (

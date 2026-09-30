@@ -34,10 +34,15 @@ class FakeSandbox:
     def __init__(
         self,
         result: ExecutionResult | Exception = PASSED,
-        repository_result: ExecutionResult | Exception = TESTS_PASSED,
+        repository_result: ExecutionResult | Exception | list = TESTS_PASSED,
     ) -> None:
         self._result = result
-        self._repository_result = repository_result
+        # One result for every repository run, or one per run in order, the last repeated.
+        self._repository_results = (
+            list(repository_result)
+            if isinstance(repository_result, list)
+            else [repository_result]
+        )
         self.calls: list[GeneratedCode] = []
         self.repositories: list[dict[str, bytes]] = []
 
@@ -49,9 +54,11 @@ class FakeSandbox:
 
     async def run_repository(self, files: Mapping[str, bytes]) -> ExecutionResult:
         self.repositories.append(dict(files))
-        if isinstance(self._repository_result, Exception):
-            raise self._repository_result
-        return self._repository_result
+        results = self._repository_results
+        result = results.pop(0) if len(results) > 1 else results[0]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class FakeStream:

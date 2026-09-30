@@ -310,6 +310,10 @@ export type StepId =
   | "review"
   | "repository"
   | "existing_tests"
+  | "understand"
+  | "change"
+  | "verify"
+  | "review_changes"
 export type StepState = "done" | "current" | "pending"
 
 export interface WorkStep {
@@ -410,26 +414,98 @@ export function existingTestsSummary(result: ExecutionResult): string {
   return failed > 0 ? `${passed} passed · ${failed} failed` : `${passed} passed`
 }
 
-/** DEVELOP: get the repository, then run the tests it already has. */
+/** Tests run on a changed repository: they passed, they failed, or they couldn't run. */
+export type VerificationOutcome = "passed" | "failed" | "not_run"
+
+/**
+ * A sandbox or limit problem is never a test failure. Anything pytest itself reports after
+ * the change (a failing test, or code that no longer imports) is: the tests ran before it.
+ */
+export function verificationOutcome(result: ExecutionResult): VerificationOutcome {
+  if (result.status === "passed") return "passed"
+  if (result.status === "failed") return "failed"
+  return "not_run"
+}
+
+/** The tests on the changed repository in one phrase. */
+export function verificationSummary(result: ExecutionResult): string {
+  switch (verificationOutcome(result)) {
+    case "passed":
+      return existingTestsSummary(result)
+    case "failed":
+      return result.tests_passed === null ? "failed before any test ran" : existingTestsSummary(result)
+    case "not_run":
+      if (result.status === "timed_out") return "didn't finish in time"
+      if (result.status === "resource_exceeded") return "hit a resource limit"
+      return "couldn't run"
+  }
+}
+
+function step(id: StepId, current: boolean, done: boolean, labels: [string, string, string]): WorkStep {
+  const [doing, finished, todo] = labels
+  if (current) return { id, state: "current", label: doing }
+  return done ? { id, state: "done", label: finished } : { id, state: "pending", label: todo }
+}
+
+/** What a DEVELOP repair is fixing, from the evidence that asked for it. */
+function repairDetail(run: Run): string | undefined {
+  const review = run.critic_result
+  const issue = review?.code_issue || review?.test_issue
+  if (issue) return firstSentence(issue)
+  const after = run.verification
+  return after && verificationOutcome(after) === "failed" ? `Tests: ${verificationSummary(after)}` : undefined
+}
+
+/**
+ * DEVELOP: read the repository, check its tests, then understand, change, test, review. The
+ * one repair sends the change step back to "current"; its tests then run again.
+ */
 function developSteps(run: Run): WorkStep[] {
-  const repository: WorkStep =
-    run.stage === "fetching_repository"
-      ? { id: "repository", state: "current", label: "Getting the repository…" }
-      : run.repository_ref
-        ? { id: "repository", state: "done", label: "Repository ready" }
-        : { id: "repository", state: "pending", label: "Get the repository" }
-  const tests: WorkStep =
-    run.stage === "running_existing_tests"
-      ? { id: "existing_tests", state: "current", label: "Running the existing tests…" }
-      : run.existing_tests
-        ? {
-            id: "existing_tests",
-            state: "done",
-            label: `Existing tests: ${existingTestsSummary(run.existing_tests)}`,
-            problem: run.existing_tests.status !== "passed",
-          }
-        : { id: "existing_tests", state: "pending", label: "Run the existing tests" }
-  return [repository, tests]
+  const stage = run.stage
+  const existing = run.existing_tests
+  const changes = run.changes
+  const after = run.verification
+  const again = run.first_attempt !== null
+  return [
+    step("repository", stage === "fetching_repository", run.repository_ref !== null, [
+      "Reading the repository…",
+      "Repository read",
+      "Read the repository",
+    ]),
+    {
+      ...step("existing_tests", stage === "running_existing_tests", existing !== null, [
+        "Running the existing tests…",
+        existing ? `Existing tests: ${existingTestsSummary(existing)}` : "",
+        "Run the existing tests",
+      ]),
+      problem: existing !== null && existing.status !== "passed",
+    },
+    step("understand", stage === "understanding_task", changes !== null || stage === "making_changes", [
+      "Understanding the task…",
+      "Task understood",
+      "Understand the task",
+    ]),
+    stage === "fixing_issue"
+      ? { id: "change", state: "current", label: "Fixing an issue…", detail: repairDetail(run) }
+      : step("change", stage === "making_changes", changes !== null, [
+          "Making changes…",
+          changes ? `${formatCount(changes.files.length, "file")} changed` : "",
+          "Make the changes",
+        ]),
+    {
+      ...step("verify", stage === "running_tests", after !== null, [
+        again ? "Running tests again…" : "Running tests…",
+        after ? `Tests: ${verificationSummary(after)}` : "",
+        "Run the tests",
+      ]),
+      problem: after !== null && verificationOutcome(after) !== "passed",
+    },
+    step("review_changes", stage === "reviewing_changes", false, [
+      "Reviewing the changes…",
+      "",
+      "Review the changes",
+    ]),
+  ]
 }
 
 /** The request that starts this run again, as it was asked for. */
@@ -446,7 +522,7 @@ export type EndingTone = "success" | "attention" | "neutral"
 export type EndingAction = "copy" | "new_run" | "run_again" | "edit" | "log"
 
 export interface Ending {
-  kind: FailureKind | "accepted" | "expired" | "checked"
+  kind: FailureKind | "accepted" | "expired" | "checked" | "changed" | "needs_review"
   title: string
   description: string
   tone: EndingTone
@@ -472,6 +548,7 @@ export function hasRunLog(run: Run): boolean {
     run.execution_result !== null ||
     run.critic_result !== null ||
     run.existing_tests !== null ||
+    run.changes !== null ||
     run.error !== null
   )
 }
@@ -494,11 +571,36 @@ function unverifiedDescription(run: Run): string {
 }
 
 /**
- * DEVELOP, first slice: a completed run has checked the repository. Its tests are reported
- * as they are; failing ones are evidence, not a verdict on the run.
+ * DEVELOP: changes are ready for review only when the tests passed on them. Tests that still
+ * fail, or couldn't run, leave changes that need the person's review. Either way the diff is
+ * there to read: passing tests are evidence, not proof, and no review is a guarantee.
  */
 function describeDevelopEnding(run: Run): Ending {
+  if (run.status === "completed" && run.changes !== null) {
+    const after = run.verification
+    const files = `${formatCount(run.changes.files.length, "file")} changed`
+    const tests = after ? ` · Tests: ${verificationSummary(after)}` : ""
+    if (after !== null && verificationOutcome(after) === "passed") {
+      return {
+        kind: "changed",
+        title: "Changes ready for review",
+        description: `${files}${tests}`,
+        tone: "success",
+        actions: ["new_run"],
+        openLog: false,
+      }
+    }
+    return {
+      kind: "needs_review",
+      title: "Changes need your review",
+      description: `${files}${tests}`,
+      tone: "attention",
+      actions: ["run_again", "new_run"],
+      openLog: false,
+    }
+  }
   if (run.status === "completed") {
+    // A run from before changes were made: it only checked the repository.
     const result = run.existing_tests
     const clean = result !== null && result.status === "passed" && (result.tests_passed ?? 0) > 0
     return {
@@ -517,6 +619,9 @@ function describeDevelopEnding(run: Run): Ending {
     case "environment":
       // The run log says what stopped the tests, so it opens by itself.
       return { ...failure, tone: "attention", actions: ["log", "new_run"], openLog: true }
+    case "unchanged":
+      // Rewording the task is the most likely way forward.
+      return { ...failure, tone: "neutral", actions: ["edit", "run_again"], openLog: false }
     case "sandbox":
       return {
         ...failure,
@@ -579,7 +684,9 @@ export function announcement(run: Run): string {
     case "queued":
       return "Waiting to start"
     case "working":
-      return STAGE_ACTIVITY[run.stage]
+      return run.stage === "running_tests" && run.first_attempt !== null
+        ? "Running tests again"
+        : STAGE_ACTIVITY[run.stage]
     case "resuming":
       return "Accepting"
     case "awaiting_approval":

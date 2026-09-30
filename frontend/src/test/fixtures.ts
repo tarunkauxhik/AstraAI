@@ -4,6 +4,7 @@
  * type requires every key, so a field the server does not send cannot sneak in.
  */
 import type {
+  ChangeSet,
   CriticResult,
   ExecutionResult,
   GeneratedCode,
@@ -118,6 +119,9 @@ const BASE: Run = {
   repository: null,
   repository_ref: null,
   existing_tests: null,
+  changes: null,
+  verification: null,
+  first_attempt: null,
   created_at: CREATED,
   updated_at: CREATED,
   requirements: null,
@@ -441,5 +445,132 @@ export const developNotPublicRun = run({
     message:
       "AstraAi couldn't find a public repository at this address. If it's private, GitHub access isn't configured yet.",
     stage: "fetching_repository",
+  },
+})
+
+// DEVELOP: a change to the repository, as a diff, and the tests run again on it.
+
+export const CHANGES: ChangeSet = {
+  files: [
+    {
+      path: "report/cli.py",
+      status: "modified",
+      additions: 3,
+      deletions: 1,
+      diff:
+        "--- a/report/cli.py\n+++ b/report/cli.py\n@@ -10,7 +10,9 @@\n def main(argv):\n     parser = build_parser()\n-    args = parser.parse_args(argv)\n+    parser.add_argument(\"--json\", action=\"store_true\")\n+    args = parser.parse_args(argv)\n+    if args.json:\n+        return print_json(args)\n     return print_table(args)\n",
+    },
+    {
+      path: "tests/test_cli.py",
+      status: "added",
+      additions: 4,
+      deletions: 0,
+      diff:
+        "--- /dev/null\n+++ b/tests/test_cli.py\n@@ -0,0 +1,4 @@\n+from report.cli import main\n+\n+def test_json(capsys):\n+    main([\"--json\"])\n",
+    },
+  ],
+  explanation: "Adds a --json flag that prints the report as JSON, with a test.",
+}
+
+export const TESTS_AFTER_PASSED: ExecutionResult = {
+  ...EXISTING_TESTS_PASSED,
+  stdout: "........\n129 passed in 3.30s\n",
+  tests_passed: 129,
+}
+
+export const TESTS_AFTER_FAILED: ExecutionResult = {
+  ...EXISTING_TESTS_PASSED,
+  status: "failed",
+  exit_code: 1,
+  stdout: "FAILED tests/test_cli.py::test_json - AssertionError: expected JSON\n1 failed, 128 passed in 3.30s\n",
+  tests_passed: 128,
+  tests_failed: 1,
+  error_type: "test_failure",
+}
+
+export const developMakingChangesRun = run({
+  ...developTestingRun,
+  stage: "making_changes",
+  existing_tests: EXISTING_TESTS_PASSED,
+})
+
+export const developChangedRun = run({
+  ...developMakingChangesRun,
+  status: "completed",
+  stage: "completed",
+  changes: CHANGES,
+  verification: TESTS_AFTER_PASSED,
+  critic_result: PASS_VERDICT,
+})
+
+export const developChangedFailingRun = run({
+  ...developChangedRun,
+  verification: TESTS_AFTER_FAILED,
+  critic_result: {
+    verdict: "code_failure",
+    reason: "The flag is parsed after the arguments are read.",
+    code_issue: "--json is added after parse_args runs.",
+    test_issue: "",
+    recommended_action: "revise_code",
+  },
+})
+
+export const developChangedNotRunRun = run({
+  ...developChangedRun,
+  verification: { ...INFRASTRUCTURE_ERROR },
+  critic_result: null,
+})
+
+// The one repair: the first change's tests failed, AstraAi fixes it, then tests it again.
+const FIRST_REVIEW = developChangedFailingRun.critic_result!
+
+export const developFixingRun = run({
+  ...developChangedFailingRun,
+  status: "running",
+  stage: "fixing_issue",
+})
+
+export const developRetestingRun = run({
+  ...developFixingRun,
+  stage: "running_tests",
+  verification: null,
+  critic_result: null,
+  revision_count: 1,
+  first_attempt: { verification: TESTS_AFTER_FAILED, review: FIRST_REVIEW },
+})
+
+export const developRepairedRun = run({
+  ...developRetestingRun,
+  status: "completed",
+  stage: "completed",
+  verification: TESTS_AFTER_PASSED,
+  critic_result: PASS_VERDICT,
+})
+
+export const developRepairFailedRun = run({
+  ...developRepairedRun,
+  verification: TESTS_AFTER_FAILED,
+  critic_result: FIRST_REVIEW,
+})
+
+export const developNoUsefulChangesRun = run({
+  ...developMakingChangesRun,
+  status: "failed",
+  stage: "failed",
+  error: {
+    code: "no_changes",
+    message: "AstraAi didn't find anything to change for this task.",
+    stage: "making_changes",
+  },
+})
+
+export const developNotAppliedRun = run({
+  ...developMakingChangesRun,
+  status: "failed",
+  stage: "failed",
+  error: {
+    code: "changes_not_applied",
+    message: "AstraAi's changes didn't match the repository exactly, so nothing was changed.",
+    stage: "making_changes",
   },
 })

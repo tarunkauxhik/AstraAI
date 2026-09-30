@@ -256,6 +256,72 @@ class ApprovalRequest(BaseModel):
     approval_means: str
 
 
+class ChangePlan(BaseModel):
+    """What a task asks of a repository, and the files needed to do it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(description="What must change, in one or two sentences.")
+    files: list[str] = Field(
+        description="Paths from the file list, most important first: the code to change "
+        "and the tests that cover it. At most 8."
+    )
+
+
+class FileEdit(BaseModel):
+    """One exact replacement in one file, or a whole new file."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(description="A file shown in the repository data, or a new file.")
+    old: str = Field(
+        description="Text copied exactly from that file, long enough to appear in it only "
+        "once. Empty to create a new file."
+    )
+    new: str = Field(description="The text that replaces old, or the whole new file.")
+
+
+class CodeChanges(BaseModel):
+    """The smallest set of edits that does the task."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    edits: list[FileEdit]
+    explanation: str = Field(
+        description="What changed and why, briefly, for the person reviewing it."
+    )
+
+
+class FileChange(BaseModel):
+    """One changed file, as a unified diff against the repository as downloaded."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    status: Literal["modified", "added"]
+    additions: int
+    deletions: int
+    diff: str
+
+
+class ChangeSet(BaseModel):
+    """What AstraAi changed: derived only from the edits it applied, files sorted by path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    files: list[FileChange]
+    explanation: str
+
+
+class FirstAttempt(BaseModel):
+    """DEVELOP: how the first change fared, kept once one repair has replaced it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verification: ExecutionResult
+    review: CriticResult
+
+
 class AgentState(TypedDict):
     """State shared by every node of an AstraAi run."""
 
@@ -269,6 +335,13 @@ class AgentState(TypedDict):
     repository_ref: NotRequired[RepositoryRef]
     # DEVELOP: the repository's own test suite, run as-is before any change.
     existing_tests: NotRequired[ExecutionResult]
+    # DEVELOP: what to change and which files to read, the changes made, and the same
+    # tests run again on the changed repository.
+    change_plan: NotRequired[ChangePlan]
+    changes: NotRequired[ChangeSet]
+    verification: NotRequired[ExecutionResult]
+    # DEVELOP: the first change's evidence, once the single repair has replaced it.
+    first_attempt: NotRequired[FirstAttempt]
     requirements: NotRequired[Requirements]
     generated_tests: NotRequired[GeneratedTests]
     generated_code: NotRequired[GeneratedCode]
@@ -292,3 +365,6 @@ class GraphContext:
     # Each DEVELOP run's repository files, by run id, for as long as the run is working.
     # Never checkpointed: the run manager drops a run's entry whenever it stops working.
     snapshots: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    # The same repository as downloaded, kept once it has been changed: every diff is
+    # original to final. Dropped with the snapshot.
+    originals: dict[str, dict[str, bytes]] = field(default_factory=dict)

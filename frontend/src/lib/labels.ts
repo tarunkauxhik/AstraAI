@@ -30,8 +30,13 @@ export const STAGE_ACTIVITY: Record<RunStage, string> = {
   reviewing: "Reviewing the solution",
   revising_code: "Fixing the solution",
   revising_tests: "Fixing the tests",
-  fetching_repository: "Getting the repository",
+  fetching_repository: "Reading the repository",
   running_existing_tests: "Running the existing tests",
+  understanding_task: "Understanding the task",
+  making_changes: "Making changes",
+  running_tests: "Running tests",
+  reviewing_changes: "Reviewing the changes",
+  fixing_issue: "Fixing an issue",
   waiting_for_approval: "Ready for review",
   resuming: "Accepting",
   completed: "Accepted",
@@ -93,6 +98,7 @@ export type FailureKind =
   | "internal"
   | "repository"
   | "environment"
+  | "unchanged"
 
 export interface FailureCopy {
   kind: FailureKind
@@ -187,6 +193,21 @@ export const FAILURES: Record<KnownErrorCode, FailureCopy> = {
     kind: "environment",
     title: "Couldn't run the tests",
     description: "AstraAi couldn't run this repository in its current environment.",
+  },
+  no_relevant_files: {
+    kind: "unchanged",
+    title: "No changes made",
+    description: "AstraAi couldn't find the code this task is about.",
+  },
+  no_changes: {
+    kind: "unchanged",
+    title: "No useful changes",
+    description: "AstraAi didn't find anything to change for this task.",
+  },
+  changes_not_applied: {
+    kind: "unchanged",
+    title: "No changes made",
+    description: "AstraAi's changes didn't match the repository exactly, so nothing was changed.",
   },
 }
 

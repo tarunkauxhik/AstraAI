@@ -36,8 +36,10 @@ from app.repository import RepositoryError
 from app.state import (
     ApprovalRequest,
     ApprovalStatus,
+    ChangeSet,
     CriticResult,
     ExecutionResult,
+    FirstAttempt,
     GeneratedCode,
     GeneratedTests,
     GraphContext,
@@ -71,9 +73,16 @@ RunStage = Literal[
     "reviewing",
     "revising_code",
     "revising_tests",
-    # DEVELOP: getting the repository, then running its existing tests.
+    # DEVELOP: getting the repository and running its existing tests, then one change,
+    # the tests again, and a review.
     "fetching_repository",
     "running_existing_tests",
+    "understanding_task",
+    "making_changes",
+    "running_tests",
+    "reviewing_changes",
+    # DEVELOP: the one repair, after the first change's tests or review found a problem.
+    "fixing_issue",
     "waiting_for_approval",
     # Approved and about to continue on its checkpoint.
     "resuming",
@@ -96,6 +105,11 @@ NODE_STAGES: dict[str, RunStage] = {
     "retry_execution": "executing",
     "prepare_repository": "fetching_repository",
     "run_existing_tests": "running_existing_tests",
+    "understand_task": "understanding_task",
+    "edit_code": "making_changes",
+    "run_tests": "running_tests",
+    "review_changes": "reviewing_changes",
+    "repair_changes": "fixing_issue",
 }
 # Where each mode's graph starts, shown from the moment a worker claims the run.
 FIRST_STAGES: dict[Mode, RunStage] = {
@@ -114,6 +128,9 @@ RESULT_FIELDS = frozenset(
         "approval_status",
         "repository_ref",
         "existing_tests",
+        "changes",
+        "verification",
+        "first_attempt",
     }
 )
 
@@ -143,6 +160,11 @@ class Run(BaseModel):
     repository: str | None = None
     repository_ref: RepositoryRef | None = None
     existing_tests: ExecutionResult | None = None
+    # DEVELOP: the change as a diff, and the same tests run on the changed repository.
+    changes: ChangeSet | None = None
+    verification: ExecutionResult | None = None
+    # DEVELOP: the first change's tests and review, when one repair replaced that change.
+    first_attempt: FirstAttempt | None = None
     created_at: datetime
     updated_at: datetime
     requirements: Requirements | None = None
@@ -249,6 +271,7 @@ class RunManager:
         approval_sweep_seconds: float = APPROVAL_SWEEP_SECONDS,
         clock: Callable[[], datetime] = utc_now,
         develop_graph: CompiledStateGraph | None = None,
+        develop_run_timeout_seconds: float | None = None,
     ) -> None:
         if graph.checkpointer is None:
             raise ValueError("RunManager needs a graph compiled with a checkpointer")
@@ -266,7 +289,11 @@ class RunManager:
         self._context = context
         self._max_active_runs = max_active_runs
         self._max_retained_runs = max_retained_runs
-        self._run_timeout_seconds = run_timeout_seconds
+        # A DEVELOP run runs a whole test suite twice around its model calls.
+        self._run_timeouts: dict[Mode, float] = {
+            "solve": run_timeout_seconds,
+            "develop": develop_run_timeout_seconds or run_timeout_seconds,
+        }
         self._approval_timeout = timedelta(seconds=approval_timeout_seconds)
         self._approval_sweep_seconds = approval_sweep_seconds
         self._clock = clock
@@ -564,7 +591,7 @@ class RunManager:
                 graph_input |= {"mode": run.mode, "repository": run.repository}
         try:
             # Each start or resume gets its own window: waiting for a human is not counted.
-            async with asyncio.timeout(self._run_timeout_seconds):
+            async with asyncio.timeout(self._run_timeouts[run.mode]):
                 approval_request = await self._drive_graph(run_id, graph_input)
         except TimeoutError:
             # Cancelling the graph also cancels the active node, whose own cleanup
@@ -598,6 +625,7 @@ class RunManager:
         finally:
             # A DEVELOP run's files never outlive its work, however the work ended.
             self._context.snapshots.pop(run_id, None)
+            self._context.originals.pop(run_id, None)
             if self._store.get(run_id).status in FINISHED_STATUSES:
                 await self._graph.checkpointer.adelete_thread(run_id)
 
@@ -717,13 +745,29 @@ class RunManager:
         )
 
     def _finish_develop(self, run_id: str) -> None:
-        """A DEVELOP run completes once its existing tests have run, whatever they showed.
+        """A DEVELOP run completes once it has changes and has tested them, whatever the
+        tests showed: failing tests are evidence for the reviewer, not a failed run.
 
-        Failing tests are part of the evidence, not a failure of the run. It fails only
-        when the tests couldn't run: no sandbox, or a repository this environment can't
-        run (a missing dependency, a time or resource limit).
+        It fails when the existing tests couldn't run at all (no sandbox, or a repository
+        this environment can't run), since then nothing could verify a change.
         """
-        result = self._store.get(run_id).existing_tests
+        run = self._store.get(run_id)
+        if run.changes is not None:
+            verification = run.verification
+            if (
+                verification is not None
+                and verification.status == "infrastructure_error"
+            ):
+                # Sandbox output here is daemon messages, not the tests', so it is dropped.
+                logger.warning("Run %s: sandbox unavailable after the changes", run_id)
+                verification = verification.model_copy(
+                    update={"stdout": "", "stderr": ""}
+                )
+            self._update(
+                run_id, status="completed", stage="completed", verification=verification
+            )
+            return
+        result = run.existing_tests
         if result is None or result.status == "infrastructure_error":
             if result is not None:
                 logger.warning(
@@ -763,7 +807,8 @@ class RunManager:
                 ),
             )
             return
-        self._update(run_id, status="completed", stage="completed")
+        # The graph only ends without changes when the existing tests couldn't run.
+        self._fail(run_id, safe_error(ValueError("no changes"), "making_changes"))
 
     def _forget_old_runs(self) -> None:
         """Keep storage bounded: drop the oldest finished runs beyond the retention limit.

@@ -152,10 +152,10 @@ the active run is cancelled, failing with `shutdown`, and its container removed 
 process exits, unless it was resuming an approved run: queued, approval-waiting and
 approved runs are all left for the next start.
 
-## Develop (first slice)
+## Develop
 
 `POST /runs` with `"mode": "develop"` and a `"repository"` (a GitHub URL or `owner/name`)
-checks an existing Python repository instead of writing a function:
+changes an existing Python repository instead of writing a function:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/runs \
@@ -163,21 +163,41 @@ curl -X POST http://127.0.0.1:8000/runs \
   -d '{"task": "Add a --json flag.", "language": "python", "mode": "develop", "repository": "https://github.com/owner/name"}'
 ```
 
-AstraAi resolves the repository's default branch to its current commit, downloads the
-repository at exactly that commit, and runs its existing test suite as-is with
-`python -m pytest` in the sandbox. The run then carries `repository_ref` (the pinned
-version) and `existing_tests` (the result, failing tests included) and ends `completed`,
-or `failed` when the repository can't be fetched (`repository_not_public`,
-`repository_not_found`, `repository_empty`, `repository_too_large`,
-`repository_unsupported`, `github_unavailable`) or its tests can't run here
-(`environment_unsupported`: usually a dependency, since nothing is installed). No code is
-changed and nothing is written to GitHub yet.
+1. **Read the repository.** Its default branch is resolved to its current commit, and the
+   repository is downloaded at exactly that commit (`repository_ref`).
+2. **Run its existing tests** as-is with `python -m pytest` (`existing_tests`). If they
+   can't run here at all, the run stops before any model call (`environment_unsupported`:
+   usually a dependency, since nothing is installed).
+3. **Understand the task.** The model sees a task-ranked outline (at most 80 files, with
+   what each defines) and chooses at most 8 files.
+4. **Make changes.** It sees those files (at most 40,000 characters each, excerpted around
+   the task's words when larger; 120,000 in all) and returns exact replacements. They are
+   applied to the in-memory repository only if every one matches exactly once, in a file
+   it was shown or a new file, never in CI, credential, deployment or infrastructure
+   files; otherwise nothing changes (`changes_not_applied`, `no_changes`,
+   `no_relevant_files`).
+5. **Run the tests again** on the changed repository (`verification`).
+6. **Review the changes** (`critic_result`; a model "pass" never outvotes failing tests).
+7. **Repair once, if needed.** If the tests now fail where they didn't before, or they pass
+   but the review asks for a fix, the model gets one repair: the task, the changed files as
+   they are now, the diff, the end of the test output and the review's findings, never
+   the whole repository. Its exact edits go through the same checks, then steps 5 and 6
+   run again and the run ends, whatever they show. A sandbox or limit problem never
+   triggers a repair. The first change's tests and review are kept as `first_attempt`.
+
+A run that got this far ends `completed` with `changes`: one unified diff per changed file,
+always from the repository as downloaded to the final version, with an explanation. Its
+changes are ready for review when the final tests pass, and need the person's review when
+they still fail or couldn't run; a sandbox or limit problem is reported as tests that
+couldn't run, never as failures. Nothing is written to GitHub.
 
 - **Repository data is untrusted.** The archive is read in memory, never extracted to
   disk: regular files only, no links or devices, no absolute or `..` paths, at most 20 MB
   downloaded, 64 MB unpacked and 10,000 files. It reaches the sandbox only as a tar on
   stdin, and is dropped as soon as the run stops working. It never enters run state or
-  checkpoints.
+  checkpoints; only the diff does. Everything the model sees of it is fenced as untrusted
+  data with a random marker per call, and the model can only choose files and propose
+  replacements: no commands, no paths outside the repository.
 - **GitHub access is read-only.** Public repositories need no token. `GITHUB_TOKEN`, if
   set, is sent to `api.github.com` only: never to the download redirect, the sandbox, the
   model, run state, checkpoints or logs.

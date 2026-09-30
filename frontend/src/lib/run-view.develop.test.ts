@@ -7,17 +7,32 @@ import {
   existingTestsSummary,
   hasRunLog,
   runRequest,
+  verificationOutcome,
+  verificationSummary,
   workSteps,
 } from "@/lib/run-view"
 import {
   completedRun,
+  developChangedFailingRun,
+  developChangedNotRunRun,
+  developChangedRun,
   developCheckedRun,
   developEnvironmentRun,
   developFailingTestsRun,
   developFetchingRun,
+  developFixingRun,
+  developMakingChangesRun,
+  developRepairedRun,
+  developRepairFailedRun,
+  developRetestingRun,
+  developNoUsefulChangesRun,
+  developNotAppliedRun,
   developNotPublicRun,
   developTestingRun,
   EXISTING_TESTS_PASSED,
+  INFRASTRUCTURE_ERROR,
+  TESTS_AFTER_FAILED,
+  TESTS_AFTER_PASSED,
 } from "@/test/fixtures"
 
 describe("existing tests in one phrase", () => {
@@ -35,16 +50,119 @@ describe("existing tests in one phrase", () => {
 describe("develop work steps", () => {
   const steps = (run: Run) => workSteps(run).map((step) => [step.state, step.label])
 
-  it("gets the repository, then runs its existing tests", () => {
+  it("reads the repository, checks its tests, then understands, changes, tests and reviews", () => {
     expect(steps(developFetchingRun)).toEqual([
-      ["current", "Getting the repository…"],
+      ["current", "Reading the repository…"],
       ["pending", "Run the existing tests"],
+      ["pending", "Understand the task"],
+      ["pending", "Make the changes"],
+      ["pending", "Run the tests"],
+      ["pending", "Review the changes"],
     ])
-    expect(steps(developTestingRun)).toEqual([
-      ["done", "Repository ready"],
-      ["current", "Running the existing tests…"],
+    expect(steps(developMakingChangesRun)).toEqual([
+      ["done", "Repository read"],
+      ["done", "Existing tests: 128 passed"],
+      ["done", "Task understood"],
+      ["current", "Making changes…"],
+      ["pending", "Run the tests"],
+      ["pending", "Review the changes"],
     ])
     expect(announcement(developTestingRun)).toBe("Running the existing tests")
+    expect(announcement(developMakingChangesRun)).toBe("Making changes")
+  })
+
+  it("never names a step with internal vocabulary", () => {
+    const labels = [developFetchingRun, developTestingRun, developMakingChangesRun]
+      .flatMap((run) => workSteps(run).map((step) => step.label))
+      .join(" ")
+
+    expect(labels).not.toMatch(/baseline|sha|commit|workspace|context|graph|node|budget|plan/i)
+  })
+})
+
+describe("verification after the change", () => {
+  it.each([
+    [TESTS_AFTER_PASSED, "passed", "129 passed"],
+    [TESTS_AFTER_FAILED, "failed", "128 passed · 1 failed"],
+    [
+      { ...TESTS_AFTER_FAILED, exit_code: 2, error_type: "environment_error", tests_passed: null, tests_failed: null },
+      "failed",
+      "failed before any test ran",
+    ],
+    [{ ...INFRASTRUCTURE_ERROR }, "not_run", "couldn't run"],
+    [{ ...TESTS_AFTER_PASSED, status: "timed_out" as const }, "not_run", "didn't finish in time"],
+    [{ ...TESTS_AFTER_PASSED, status: "resource_exceeded" as const }, "not_run", "hit a resource limit"],
+  ])("%#: reads as %s, %s", (result, outcome, phrase) => {
+    expect(verificationOutcome(result)).toBe(outcome)
+    expect(verificationSummary(result)).toBe(phrase)
+  })
+})
+
+describe("the three outcomes", () => {
+  it.each([
+    [developChangedRun, "Changes ready for review", "2 files changed · Tests: 129 passed", "success"],
+    [developRepairedRun, "Changes ready for review", "2 files changed · Tests: 129 passed", "success"],
+    [
+      developChangedFailingRun,
+      "Changes need your review",
+      "2 files changed · Tests: 128 passed · 1 failed",
+      "attention",
+    ],
+    [
+      developRepairFailedRun,
+      "Changes need your review",
+      "2 files changed · Tests: 128 passed · 1 failed",
+      "attention",
+    ],
+    [developChangedNotRunRun, "Changes need your review", "2 files changed · Tests: couldn't run", "attention"],
+  ])("%#", (run, title, description, tone) => {
+    const ending = describeEnding(run)
+
+    expect([ending.title, ending.description, ending.tone]).toEqual([title, description, tone])
+    expect(announcement(run)).toBe(title)
+  })
+
+  it("no useful changes only when nothing needed to change", () => {
+    expect(describeEnding(developNoUsefulChangesRun).title).toBe("No useful changes")
+    expect(describeEnding(developNotAppliedRun).title).toBe("No changes made")
+  })
+
+  it("changes that couldn't be made offer to reword the task", () => {
+    const ending = describeEnding(developNotAppliedRun)
+
+    expect([ending.title, ending.actions]).toEqual(["No changes made", ["edit", "run_again"]])
+  })
+})
+
+describe("the one repair", () => {
+  it("sends the change step back with what is being fixed", () => {
+    const steps = workSteps(developFixingRun)
+    const change = steps.find((step) => step.id === "change")!
+
+    expect([change.state, change.label, change.detail]).toEqual([
+      "current",
+      "Fixing an issue…",
+      "--json is added after parse_args runs.",
+    ])
+    expect(announcement(developFixingRun)).toBe("Fixing an issue")
+  })
+
+  it("then runs the tests again", () => {
+    const verify = workSteps(developRetestingRun).find((step) => step.id === "verify")!
+
+    expect([verify.state, verify.label]).toEqual(["current", "Running tests again…"])
+    expect(announcement(developRetestingRun)).toBe("Running tests again")
+  })
+
+  it("never shows a counter, a budget or an attempt number", () => {
+    const text = JSON.stringify([
+      workSteps(developFixingRun),
+      workSteps(developRetestingRun),
+      describeEnding(developRepairedRun),
+      describeEnding(developRepairFailedRun),
+    ])
+
+    expect(text).not.toMatch(/attempt|revision|budget|\b[12]\/[12]\b/i)
   })
 })
 

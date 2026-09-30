@@ -9,20 +9,29 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.nodes.analyze_task import analyze_task
 from app.nodes.critic import critic
+from app.nodes.edit_code import edit_code
 from app.nodes.execute_sandbox import execute_sandbox
 from app.nodes.generate_code import generate_code
 from app.nodes.generate_tests import generate_tests
 from app.nodes.human_approval import human_approval
 from app.nodes.prepare_repository import prepare_repository
+from app.nodes.repair_changes import repair_changes
 from app.nodes.retry_execution import retry_execution
+from app.nodes.review_changes import review_changes
 from app.nodes.revise_code import revise_code
 from app.nodes.revise_tests import revise_tests
 from app.nodes.run_existing_tests import run_existing_tests
-from app.repair import repair_router
+from app.nodes.run_tests import run_tests
+from app.nodes.understand_task import understand_task
+from app.repair import develop_router, repair_router
 from app.state import (
     AgentState,
+    ChangePlan,
+    ChangeSet,
     CriticResult,
     ExecutionResult,
+    FileChange,
+    FirstAttempt,
     GeneratedCode,
     GeneratedTests,
     GraphContext,
@@ -38,6 +47,10 @@ CHECKPOINTED_MODELS = (
     ExecutionResult,
     CriticResult,
     RepositoryRef,
+    ChangePlan,
+    ChangeSet,
+    FileChange,
+    FirstAttempt,
 )
 
 
@@ -101,15 +114,54 @@ def build_graph(checkpointer: BaseCheckpointSaver | None) -> CompiledStateGraph:
     return builder.compile(checkpointer=checkpointer)
 
 
+def existing_tests_ran(state: AgentState) -> str:
+    """Change the repository only if its own tests can run here: they verify the change.
+
+    Failing tests still ran. A suite that couldn't run stops the run before any model call.
+    """
+    result = state.get("existing_tests")
+    ran = result is not None and (
+        result.status == "passed" or result.error_type == "test_failure"
+    )
+    return "understand_task" if ran else END
+
+
+def repaired(state: AgentState) -> str:
+    """Test and review a repair that was made; if none could be, the first change stands."""
+    return "run_tests" if state.get("first_attempt") is not None else END
+
+
 def build_develop_graph(checkpointer: BaseCheckpointSaver | None) -> CompiledStateGraph:
-    """DEVELOP, first slice: the repository at its current commit, and its own tests.
+    """DEVELOP: the repository at its current commit and its own tests, then one change,
+    the same tests on the changed repository, and a review. If the tests or the review show
+    the change is wrong, one repair, tested and reviewed the same way; then it ends.
 
     Shares the SOLVE graph's checkpointer; a run's mode decides which graph drives it.
     """
     builder = StateGraph(AgentState, context_schema=GraphContext)
     builder.add_node("prepare_repository", prepare_repository)
     builder.add_node("run_existing_tests", run_existing_tests)
+    builder.add_node("understand_task", understand_task)
+    builder.add_node("edit_code", edit_code)
+    builder.add_node("run_tests", run_tests)
+    builder.add_node("review_changes", review_changes)
+    builder.add_node("repair_changes", repair_changes)
     builder.add_edge(START, "prepare_repository")
     builder.add_edge("prepare_repository", "run_existing_tests")
-    builder.add_edge("run_existing_tests", END)
+    builder.add_conditional_edges(
+        "run_existing_tests",
+        existing_tests_ran,
+        {"understand_task": "understand_task", END: END},
+    )
+    builder.add_edge("understand_task", "edit_code")
+    builder.add_edge("edit_code", "run_tests")
+    builder.add_edge("run_tests", "review_changes")
+    builder.add_conditional_edges(
+        "review_changes",
+        develop_router,
+        {"repair_changes": "repair_changes", "finish": END},
+    )
+    builder.add_conditional_edges(
+        "repair_changes", repaired, {"run_tests": "run_tests", END: END}
+    )
     return builder.compile(checkpointer=checkpointer)

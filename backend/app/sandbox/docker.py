@@ -43,6 +43,9 @@ INSPECT_FORMAT = (
 # Docker's zero time: the container's process was never started.
 NEVER_STARTED = "0001-01-01T00:00:00Z"
 CONTAINER_PREFIX = "astraai-sandbox-"
+# create, inspect, kill and rm answer in seconds; a CLI call that doesn't has lost the
+# daemon, and must end as an infrastructure error instead of stalling the run.
+DOCKER_CLI_TIMEOUT_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -365,7 +368,15 @@ class DockerSandbox:
             )
         except FileNotFoundError as exc:
             return Completed(127, "", f"docker CLI unavailable: {exc}")
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), DOCKER_CLI_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            logger.warning("docker %s did not answer in time", args[0])
+            return Completed(124, "", "docker CLI timed out")
         return Completed(
             process.returncode or 0,
             stdout.decode("utf-8", errors="replace"),

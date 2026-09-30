@@ -31,6 +31,11 @@ export type RunStage =
   | "revising_tests"
   | "fetching_repository"
   | "running_existing_tests"
+  | "understanding_task"
+  | "making_changes"
+  | "running_tests"
+  | "reviewing_changes"
+  | "fixing_issue"
   | "waiting_for_approval"
   | "resuming"
   | "completed"
@@ -90,6 +95,9 @@ export const KNOWN_ERROR_CODES = [
   "repository_too_large",
   "repository_unsupported",
   "environment_unsupported",
+  "no_relevant_files",
+  "no_changes",
+  "changes_not_applied",
 ] as const
 
 export type KnownErrorCode = (typeof KNOWN_ERROR_CODES)[number]
@@ -184,6 +192,27 @@ export interface RepositoryRef {
   commit_sha: string
 }
 
+/** One changed file, as a unified diff against the repository as downloaded. */
+export interface FileChange {
+  path: string
+  status: "modified" | "added"
+  additions: number
+  deletions: number
+  diff: string
+}
+
+/** What AstraAi changed in a repository, files sorted by path. */
+export interface ChangeSet {
+  files: FileChange[]
+  explanation: string
+}
+
+/** DEVELOP: how the first change fared, once one repair replaced it. */
+export interface FirstAttempt {
+  verification: ExecutionResult
+  review: CriticResult
+}
+
 export interface RunError {
   code: ErrorCode
   message: string
@@ -202,6 +231,11 @@ export interface Run {
   repository: string | null
   repository_ref: RepositoryRef | null
   existing_tests: ExecutionResult | null
+  /** DEVELOP: the change as a diff, and the same tests run on the changed repository. */
+  changes: ChangeSet | null
+  verification: ExecutionResult | null
+  /** DEVELOP: the first change's tests and review, when one repair replaced that change. */
+  first_attempt: FirstAttempt | null
   created_at: string
   updated_at: string
   requirements: Requirements | null

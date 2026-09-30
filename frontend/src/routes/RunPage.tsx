@@ -5,6 +5,7 @@ import { Link, useParams } from "react-router"
 import type { ApiError } from "@/api/client"
 import type { Run } from "@/api/types"
 import { Brand } from "@/components/Brand"
+import { ChangesSection, VerificationSection } from "@/components/run/DevelopSections"
 import { RunLog } from "@/components/run/RunLog"
 import { RunStatus } from "@/components/run/RunStatus"
 import { SolutionSection } from "@/components/run/SolutionSection"
@@ -95,10 +96,10 @@ function RunView({ run, connectionError }: { run: Run; connectionError: ApiError
   const logOpen = logChoice ?? (isTerminal(run) && describeEnding(run).openLog)
   const [revealLog, setRevealLog] = useState(0)
   // An ending with nothing to show reads as one column; work in progress keeps its place.
-  // A DEVELOP check has no solution or tests to show beside it, so it is always one column.
   const beside =
-    run.mode === "solve" &&
-    (run.generated_tests !== null || run.generated_code !== null || !isTerminal(run))
+    run.mode === "develop"
+      ? run.changes !== null || !isTerminal(run)
+      : run.generated_tests !== null || run.generated_code !== null || !isTerminal(run)
 
   useEffect(() => {
     if (revealLog > 0) reveal("run-log", "#run-log summary")
@@ -129,8 +130,17 @@ function RunView({ run, connectionError }: { run: Run; connectionError: ApiError
           </div>
         </div>
         <div className={cn("min-w-0 space-y-12", beside && "lg:col-start-1 lg:row-start-1")}>
-          <SolutionSection run={run} />
-          <TestsSection run={run} />
+          {run.mode === "develop" ? (
+            <>
+              <ChangesSection run={run} />
+              <VerificationSection run={run} />
+            </>
+          ) : (
+            <>
+              <SolutionSection run={run} />
+              <TestsSection run={run} />
+            </>
+          )}
           {hasRunLog(run) && <RunLog run={run} open={logOpen} onOpenChange={setLogOpen} />}
         </div>
       </div>

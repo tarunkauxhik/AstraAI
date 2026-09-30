@@ -95,6 +95,7 @@ def build_run_manager(settings: Settings, context: GraphContext) -> RunManager:
         run_timeout_seconds=settings.run_timeout_seconds,
         approval_timeout_seconds=settings.approval_timeout_seconds,
         develop_graph=build_develop_graph(checkpointer),
+        develop_run_timeout_seconds=settings.develop_run_timeout_seconds,
     )
 
 

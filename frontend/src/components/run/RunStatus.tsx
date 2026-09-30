@@ -364,7 +364,8 @@ function Title({ run }: { run: Run }) {
     case "working":
       return (
         <>
-          <span id="status-title">Working</span> <Elapsed since={run.created_at} />
+          <span id="status-title">{run.mode === "develop" ? "Working on your repository" : "Working"}</span>{" "}
+          <Elapsed since={run.created_at} />
         </>
       )
     case "resuming":
