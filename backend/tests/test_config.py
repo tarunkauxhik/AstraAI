@@ -68,7 +68,7 @@ def test_llm_reliability_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.llm_retry_backoff_seconds == 1.0
     assert settings.llm_max_concurrency == 2
     assert settings.run_timeout_seconds == 300
-    assert settings.approval_timeout_seconds == 600
+    assert settings.approval_timeout_seconds == 86_400
 
 
 def test_settings_errors_do_not_echo_the_api_key(

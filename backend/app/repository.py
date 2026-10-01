@@ -75,6 +75,11 @@ MESSAGES = {
     "repository_too_large": "This repository is larger than AstraAi can check right now.",
     "repository_unsupported": "This repository contains files AstraAi can't safely handle "
     "yet, such as symbolic links.",
+    "not_python": "This repository doesn't look like a Python project: AstraAi found no "
+    "Python files in it.",
+    "no_pytest_tests": "AstraAi couldn't find tests in this repository that pytest would run.",
+    "needs_dependencies": "This repository depends on packages that would have to be "
+    "installed first, and AstraAi doesn't install packages.",
     "no_relevant_files": "AstraAi couldn't find the code this task is about.",
     "no_changes": "AstraAi didn't find anything to change for this task.",
     "changes_not_applied": "AstraAi's changes didn't match the repository exactly, so "

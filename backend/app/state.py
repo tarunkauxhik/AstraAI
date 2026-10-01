@@ -148,6 +148,9 @@ class ExecutionResult(BaseModel):
         "out_of_memory, or a sandbox infrastructure failure.",
     )
     output_truncated: bool = False
+    # A repository's pytest run: the id of every failing or erroring test, from pytest's
+    # own summary. None when that summary couldn't be read completely.
+    failed_tests: list[str] | None = None
 
 
 CriticVerdict = Literal[
@@ -288,8 +291,22 @@ class CodeChanges(BaseModel):
 
     edits: list[FileEdit]
     explanation: str = Field(
-        description="What changed and why, briefly, for the person reviewing it."
+        description="In 2-4 short sentences for the person reviewing it: what the change "
+        "does and why. With no edits: why nothing needs to change."
     )
+
+
+class RepairChanges(BaseModel):
+    """The one repair: edits on the files as they are now, and the whole change described."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    edits: list[FileEdit]
+    summary: str = Field(
+        description="In 2-4 short sentences: what the whole change does now, as the "
+        "reviewer will see it in the final diff. Not the repair's own story."
+    )
+    fix: str = Field(description="In one sentence: what this repair corrected.")
 
 
 class FileChange(BaseModel):
@@ -313,6 +330,30 @@ class ChangeSet(BaseModel):
     explanation: str
 
 
+class SuiteComparison(BaseModel):
+    """DEVELOP: the repository's tests after the change, compared with before it.
+
+    By pytest test id when both runs' failing ids are known. Otherwise the lists stay empty
+    and only a run where every test passed is clean.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    by_id: bool
+    # The tests ran, and nothing fails now that didn't fail before the change.
+    clean: bool
+    # Tests that existed and didn't fail before, and fail now.
+    broken: list[str] = []
+    # Tests the change added that fail.
+    new_failing: list[str] = []
+    # Tests that failed before the change and still fail.
+    still_failing: list[str] = []
+    # Tests that failed before the change and pass now.
+    fixed: list[str] = []
+    # How many more tests there are than before, when both runs counted them.
+    added: int | None = None
+
+
 class FirstAttempt(BaseModel):
     """DEVELOP: how the first change fared, kept once one repair has replaced it."""
 
@@ -320,6 +361,10 @@ class FirstAttempt(BaseModel):
 
     verification: ExecutionResult
     review: CriticResult
+    checks: SuiteComparison | None = None
+    # What the first change said it did, and what the repair said it corrected.
+    explanation: str = ""
+    fix: str = ""
 
 
 class AgentState(TypedDict):
@@ -342,6 +387,8 @@ class AgentState(TypedDict):
     verification: NotRequired[ExecutionResult]
     # DEVELOP: the first change's evidence, once the single repair has replaced it.
     first_attempt: NotRequired[FirstAttempt]
+    # DEVELOP: the tests after the change compared with before it.
+    checks: NotRequired[SuiteComparison]
     requirements: NotRequired[Requirements]
     generated_tests: NotRequired[GeneratedTests]
     generated_code: NotRequired[GeneratedCode]

@@ -277,7 +277,6 @@ def test_tests_that_couldnt_run_after_the_change_are_not_test_failures() -> None
             "changes_not_applied",
             id="outside",
         ),
-        pytest.param([], "no_changes", id="no-edits"),
         pytest.param(
             [
                 {
@@ -587,8 +586,20 @@ def test_a_develop_run_over_http(api: TestClient) -> None:
         run = poll(
             client, accepted.json()["run_id"], lambda r: r["status"] == "completed"
         )
+        downloaded = client.get(f"/runs/{run['run_id']}/patch")
+        missing = client.get("/runs/no-such-run/patch")
 
     assert (run["mode"], run["repository"]) == ("develop", "octo/sample")
+    assert run["outcome"] == "ready"
+    # The patch is exactly the diff shown, as a file to download.
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"].startswith("text/x-diff")
+    assert downloaded.headers["x-content-type-options"] == "nosniff"
+    assert downloaded.headers["content-disposition"] == (
+        f'attachment; filename="astraai-sample-{run["run_id"][:8]}.patch"'
+    )
+    assert downloaded.text == "".join(f["diff"] for f in run["changes"]["files"])
+    assert missing.status_code == 404
     assert run["repository_ref"]["commit_sha"] == SHA
     assert [change["path"] for change in run["changes"]["files"]] == [
         "sample/__init__.py",

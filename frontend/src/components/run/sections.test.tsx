@@ -39,7 +39,7 @@ describe("solution", () => {
 
   it("carries its own verification status", () => {
     const { unmount } = render(<SolutionSection run={waitingRun} />)
-    expect(codeCaption()).toBe("solution.py·Python·Verified")
+    expect(codeCaption()).toBe("solution.py·Python·Checks passed")
     unmount()
 
     render(<SolutionSection run={executingRun} />)
@@ -49,12 +49,12 @@ describe("solution", () => {
   it("never shows an earlier attempt's pass as the new code's status", () => {
     render(<SolutionSection run={reExecutingAfterRevisionRun} />)
     expect(codeCaption()).toContain("Checking…")
-    expect(codeCaption()).not.toContain("Verified")
+    expect(codeCaption()).not.toContain("Checks passed")
   })
 
-  it("says plainly when the final code isn't verified", () => {
+  it("says plainly when the final code didn't pass its checks", () => {
     render(<SolutionSection run={outOfFixesRun} />)
-    expect(codeCaption()).toContain("Not verified")
+    expect(codeCaption()).toContain("Checks not passed")
   })
 
   it("shows a quiet placeholder only while the solution is being written", () => {

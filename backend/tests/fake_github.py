@@ -42,9 +42,11 @@ class FakeGitHub:
         files: dict[str, bytes] = SAMPLE_FILES,
         error: str | None = None,
         archive: bytes | None = None,
+        default_branch: str = "main",
     ) -> None:
         self.archive = archive if archive is not None else make_archive(files)
         self.error = error
+        self.default_branch = default_branch
         self.resolved: list[str] = []
         self.downloaded: list[RepositoryRef] = []
 
@@ -53,7 +55,7 @@ class FakeGitHub:
         if self.error is not None:
             raise RepositoryError(self.error)
         return RepositoryRef(
-            full_name=repository, default_branch="main", commit_sha=SHA
+            full_name=repository, default_branch=self.default_branch, commit_sha=SHA
         )
 
     async def download(self, repository: RepositoryRef) -> bytes:
@@ -93,8 +95,11 @@ REVIEW_PASS = {
     "test_issue": "",
     "recommended_action": "accept",
 }
+# A repair that finds nothing to change: tests that need a real repair script their own.
+NO_REPAIR = {"edits": [], "summary": "x", "fix": "x"}
 DEVELOP_REPLIES = {
     "ChangePlan": PLAN,
     "CodeChanges": EDITS,
     "CriticResult": REVIEW_PASS,
+    "RepairChanges": NO_REPAIR,
 }

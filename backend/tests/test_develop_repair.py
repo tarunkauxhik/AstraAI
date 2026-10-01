@@ -10,7 +10,7 @@ import pytest
 
 from app.repair import route_develop
 from app.runs import RunManager
-from app.state import CriticResult
+from app.state import CriticResult, SuiteComparison
 from tests.fake_github import (
     DEVELOP_REPLIES,
     PLAN,
@@ -60,7 +60,8 @@ FIX = {
             "new": "def sub(a, b):\n    return a - b\n",
         }
     ],
-    "explanation": "Adds sub next to add, with a test; sub now subtracts.",
+    "summary": "Adds sub next to add, with a test.",
+    "fix": "sub subtracted the wrong way round; it now returns a - b.",
 }
 REVIEW_BUG = {
     "verdict": "code_failure",
@@ -69,11 +70,15 @@ REVIEW_BUG = {
     "test_issue": "",
     "recommended_action": "revise_code",
 }
+# Failures the repository already had, named by pytest as it does: not the change's doing.
+OLD_FAILURES = EXISTING_FAILURES.model_copy(
+    update={"failed_tests": ["tests/test_a.py::test_x", "tests/test_a.py::test_y"]}
+)
 REPAIR_CALLS = [
     "ChangePlan",
     "CodeChanges",
     "CriticResult",
-    "CodeChanges",
+    "RepairChanges",
     "CriticResult",
 ]
 
@@ -82,7 +87,8 @@ def buggy(**changes: Any) -> RecordingReplies:
     return RecordingReplies(
         {
             **DEVELOP_REPLIES,
-            "CodeChanges": [BUGGY_EDITS, FIX],
+            "CodeChanges": BUGGY_EDITS,
+            "RepairChanges": FIX,
             "CriticResult": [REVIEW_BUG, REVIEW_PASS],
             **changes,
         }
@@ -138,7 +144,11 @@ def test_failing_tests_get_one_repair_that_fixes_them(
     )
     assert "+def sub(a, b):\n+    return a - b\n" in source.diff
     assert "+    return a + b" not in source.diff
-    assert run.changes.explanation == FIX["explanation"]
+    # The summary describes the final change; what the repair corrected is kept apart.
+    assert run.changes.explanation == FIX["summary"]
+    assert run.first_attempt.explanation == BUGGY_EDITS["explanation"]
+    assert run.first_attempt.fix == FIX["fix"]
+    assert run.outcome == "ready"
 
 
 def test_the_repair_sees_what_went_wrong_but_not_the_whole_repository() -> None:
@@ -193,7 +203,7 @@ def test_a_review_finding_repairs_a_change_whose_tests_pass() -> None:
     [
         pytest.param(TIMED_OUT, TESTS_PASSED, id="timeout"),
         pytest.param(INFRASTRUCTURE_ERROR, TESTS_PASSED, id="sandbox"),
-        pytest.param(EXISTING_FAILURES, EXISTING_FAILURES, id="same-old-failures"),
+        pytest.param(OLD_FAILURES, OLD_FAILURES, id="same-old-failures"),
     ],
 )
 def test_no_repair_without_evidence_the_change_is_wrong(
@@ -252,11 +262,9 @@ def test_no_repair_without_evidence_the_change_is_wrong(
 def test_a_repair_that_cant_be_made_leaves_the_first_change_and_its_evidence(
     fix: Any,
 ) -> None:
-    reply = fix if isinstance(fix, str) else {**fix, "explanation": "x"}
+    reply = fix if isinstance(fix, str) else {**fix, "summary": "x", "fix": "x"}
     sandbox = FakeSandbox(repository_result=[TESTS_PASSED, NEW_TEST_FAILS, BOTH_PASS])
-    run, _, sandbox, _ = run_once(
-        sandbox=sandbox, llm=buggy(CodeChanges=[BUGGY_EDITS, reply])
-    )
+    run, _, sandbox, _ = run_once(sandbox=sandbox, llm=buggy(RepairChanges=reply))
 
     assert (run.status, run.error) == ("completed", None)
     assert len(sandbox.repositories) == 2  # Nothing new to test.
@@ -268,12 +276,16 @@ def test_a_repair_that_cant_be_made_leaves_the_first_change_and_its_evidence(
 
 def test_the_router_repairs_at_most_once() -> None:
     bug = CriticResult.model_validate(REVIEW_BUG)
-    assert route_develop(TESTS_PASSED, NEW_TEST_FAILS, bug, 0) == "repair_changes"
-    assert route_develop(TESTS_PASSED, NEW_TEST_FAILS, bug, 1) == "finish"
-    assert route_develop(TESTS_PASSED, BOTH_PASS, bug, 1) == "finish"
+    broken = SuiteComparison(by_id=True, clean=False, broken=["t.py::test_x"])
+    clean = SuiteComparison(by_id=True, clean=True)
+    assert route_develop(NEW_TEST_FAILS, broken, bug, 0) == "repair_changes"
+    assert route_develop(NEW_TEST_FAILS, broken, bug, 1) == "finish"
+    assert route_develop(BOTH_PASS, clean, bug, 1) == "finish"
     # A review that can't tell, with passing tests, is left to the person.
     unsure = bug.model_copy(update={"recommended_action": "needs_human_review"})
-    assert route_develop(TESTS_PASSED, BOTH_PASS, unsure, 0) == "finish"
+    assert route_develop(BOTH_PASS, clean, unsure, 0) == "finish"
+    # Tests that couldn't run are no evidence either way.
+    assert route_develop(TIMED_OUT, None, bug, 0) == "finish"
 
 
 def test_a_restart_during_the_repair_fails_it_once_and_keeps_no_files() -> None:
@@ -352,11 +364,12 @@ def test_the_plan_files_are_offered_to_the_repair_too() -> None:
                 "new": "    assert sub(3, 1) == 4\n",
             }
         ],
-        "explanation": "x",
+        "summary": "x",
+        "fix": "x",
     }
     llm = buggy(
         ChangePlan={**PLAN, "files": [*PLAN["files"], "README.md"]},
-        CodeChanges=[BUGGY_EDITS, fix],
+        RepairChanges=fix,
     )
     sandbox = FakeSandbox(repository_result=[TESTS_PASSED, NEW_TEST_FAILS, BOTH_PASS])
     _, _, _, llm = run_once(sandbox=sandbox, llm=llm)

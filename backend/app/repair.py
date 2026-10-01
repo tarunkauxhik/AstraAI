@@ -6,7 +6,8 @@ outcome with the same rules.
 
 from typing import Literal
 
-from app.state import AgentState, CriticResult, ExecutionResult
+from app.checks import ran
+from app.state import AgentState, CriticResult, ExecutionResult, SuiteComparison
 
 # Code or test revisions per run. Each costs an LLM call, an execution and a critic call.
 MAX_REVISIONS = 2
@@ -77,38 +78,19 @@ MAX_DEVELOP_REPAIRS = 1
 DevelopDecision = Literal["repair_changes", "finish"]
 
 
-def new_failures(existing: ExecutionResult | None, after: ExecutionResult) -> bool:
-    """Whether the changed repository's tests fail where the original's didn't.
-
-    Tests that already failed before the change say nothing about it. A suite that no longer
-    even collects does: it ran before the change.
-    """
-    if after.status != "failed":
-        return False
-    if existing is None or existing.status == "passed":
-        return True
-    if existing.tests_failed is None or after.tests_failed is None:
-        return True
-    # ponytail: compares counts, so a fixed old failure can hide a new one; compare test
-    # ids if that matters.
-    return after.tests_failed > existing.tests_failed
-
-
 def route_develop(
-    existing: ExecutionResult | None,
     after: ExecutionResult | None,
+    checks: SuiteComparison | None,
     review: CriticResult | None,
     revision_count: int,
 ) -> DevelopDecision:
-    """Repair once if the tests show the change is wrong, or if they pass but the review
-    found a real problem to fix. A sandbox or limit problem is no evidence either way, and
-    a review never outvotes failing tests: those always get the repair.
+    """Repair once if tests fail that didn't before the change, or if they don't but the
+    review asks for a fix. A sandbox or limit problem is no evidence either way, and a
+    review never outvotes failing tests: those always get the repair.
     """
-    if revision_count >= MAX_DEVELOP_REPAIRS or after is None:
+    if revision_count >= MAX_DEVELOP_REPAIRS or not ran(after):
         return "finish"
-    if after.status not in ("passed", "failed"):
-        return "finish"
-    if new_failures(existing, after):
+    if checks is None or not checks.clean:
         return "repair_changes"
     action = review.recommended_action if review is not None else None
     return "repair_changes" if action in ("revise_code", "revise_tests") else "finish"
@@ -117,8 +99,8 @@ def route_develop(
 def develop_router(state: AgentState) -> DevelopDecision:
     """The DEVELOP graph's conditional edge after the review."""
     return route_develop(
-        state.get("existing_tests"),
         state.get("verification"),
+        state.get("checks"),
         state.get("critic_result"),
         state.get("revision_count", 0),
     )

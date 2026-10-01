@@ -1,18 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react"
-import { useQueryClient } from "@tanstack/react-query"
-import { AlertTriangle, Check, Loader2, Plus, X } from "lucide-react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { AlertTriangle, Check, Download, Loader2, Plus, X } from "lucide-react"
 import { Link, useNavigate } from "react-router"
 
 import type { Run } from "@/api/types"
 import { CopyButton } from "@/components/CopyButton"
-import { ApprovalCountdown } from "@/components/run/ApprovalCountdown"
 import { InlineText } from "@/components/run/InlineText"
 import { Button } from "@/components/ui/button"
-import { useApproval, useExtendApproval } from "@/hooks/useApproval"
+import { api } from "@/api/client"
+import { useApproval } from "@/hooks/useApproval"
 import { useCreateRun } from "@/hooks/useCreateRun"
-import { boostRunPolling, runQueryKey } from "@/hooks/useRun"
 import { useServerNow } from "@/hooks/useServerNow"
-import { formatClock, formatCount, formatSpan } from "@/lib/format"
+import { formatClock, formatCount, formatMoment, formatSpan } from "@/lib/format"
 import { FILE_NAMES } from "@/lib/labels"
 import {
   describeApprovalError,
@@ -127,22 +125,13 @@ interface ReviewProps {
 /**
  * The decision. Nothing is applied locally: the panel changes when a refetch shows the
  * server moved on. The actions exist once; on phones they dock to the bottom of the screen.
+ * Accepting publishes nothing, so nothing here counts down or hurries the person.
  */
 function Review({ run, onDecided, onViewTests }: ReviewProps) {
-  const queryClient = useQueryClient()
   const approval = useApproval(run.run_id)
-  const extend = useExtendApproval(run.run_id)
-  const [expiryReached, setExpiryReached] = useState(false)
   const dock = useDockHeight()
 
-  // Zero on the countdown only means "check with the server"; the run stays as reported.
-  const handleExpiryReached = useCallback(() => {
-    setExpiryReached(true)
-    boostRunPolling(run.run_id)
-    void queryClient.invalidateQueries({ queryKey: runQueryKey(run.run_id) })
-  }, [queryClient, run.run_id])
-
-  const locked = approval.isPending || approval.isSuccess || expiryReached
+  const locked = approval.isPending || approval.isSuccess
   const result = run.execution_result
   const fixes = run.revision_count > 0 ? ` after ${formatCount(run.revision_count, "fix", "fixes")}` : ""
   // Execution evidence leads; the model's own assessment is secondary to it.
@@ -183,15 +172,6 @@ function Review({ run, onDecided, onViewTests }: ReviewProps) {
         aria-label="Review actions"
         className="space-y-1.5 max-lg:fixed max-lg:inset-x-0 max-lg:bottom-0 max-lg:z-30 max-lg:m-0 max-lg:border-t max-lg:bg-background max-lg:px-4 sm:max-lg:px-6 max-lg:pt-2 max-lg:pb-[max(0.75rem,env(safe-area-inset-bottom))]"
       >
-        {run.approval_expires_at && (
-          <ApprovalCountdown
-            expiresAt={run.approval_expires_at}
-            onReached={handleExpiryReached}
-            onMoreTime={() => extend.mutate()}
-            extending={extend.isPending}
-            disabled={locked}
-          />
-        )}
         <div className="flex gap-2">
           <Button onClick={() => decide("approve")} disabled={locked} className={cn(ACTION, "flex-2")}>
             {pending === "approve" ? (
@@ -220,19 +200,9 @@ function Review({ run, onDecided, onViewTests }: ReviewProps) {
           {describeApprovalError(approval.error)}
         </p>
       )}
-      {extend.error && !extend.isPending && (
-        <p role="alert" className="text-sm text-destructive">
-          {describeApprovalError(extend.error)}
-        </p>
-      )}
       {approval.isSuccess && (
         <p role="status" className="text-sm text-muted-foreground">
           Decision sent. Updating…
-        </p>
-      )}
-      {expiryReached && !approval.isSuccess && (
-        <p role="status" className="text-sm text-muted-foreground">
-          Checking whether the review window has closed…
         </p>
       )}
     </div>
@@ -273,12 +243,21 @@ function EndingActions({ run, actions, onOpenLog }: { run: Run; actions: EndingA
                   Copy solution
                 </CopyButton>
               )
+            case "patch":
+              return (
+                <Button key={action} asChild variant={variant(action)} size="lg" className={ACTION}>
+                  <a href={api.patchUrl(run.run_id)} download>
+                    <Download aria-hidden="true" />
+                    Download patch
+                  </a>
+                </Button>
+              )
             case "new_run":
               return (
                 <Button key={action} asChild variant={variant(action)} size="lg" className={ACTION}>
                   <Link to="/">
                     <Plus aria-hidden="true" />
-                    New run
+                    New task
                   </Link>
                 </Button>
               )
@@ -293,7 +272,7 @@ function EndingActions({ run, actions, onOpenLog }: { run: Run; actions: EndingA
                   disabled={createRun.isPending}
                 >
                   {createRun.isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
-                  {createRun.isPending ? "Starting…" : "Run again"}
+                  {createRun.isPending ? "Starting…" : "Try again"}
                 </Button>
               )
             case "edit":
@@ -319,8 +298,41 @@ function EndingActions({ run, actions, onOpenLog }: { run: Run; actions: EndingA
       </div>
       {createRun.error && (
         <p role="alert" className="text-sm text-destructive">
-          Couldn't start a new run. {createRun.error.detail}
+          Couldn't start a new task. {createRun.error.detail}
         </p>
+      )}
+    </div>
+  )
+}
+
+/** What AstraAi says it did: secondary to the evidence, so a few lines until asked for more. */
+function Summary({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const [overflowing, setOverflowing] = useState(false)
+  const body = useRef<HTMLParagraphElement>(null)
+
+  useLayoutEffect(() => {
+    const element = body.current
+    if (element && !expanded) setOverflowing(element.scrollHeight > element.clientHeight + 1)
+  }, [text, expanded])
+
+  return (
+    <div className="space-y-1">
+      <p ref={body} className={cn("text-sm leading-relaxed text-foreground/90", !expanded && "line-clamp-4")}>
+        <InlineText text={text} />
+      </p>
+      {(overflowing || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          className={cn(
+            TOUCH_TARGET,
+            "rounded-sm text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline",
+          )}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
       )}
     </div>
   )
@@ -332,9 +344,17 @@ function Ending({ run, onOpenLog }: { run: Run; onOpenLog: () => void }) {
   const worked = ending.kind === "accepted" ? workDurationMs(run) : null
   const description = worked !== null ? `${ending.description} · ${formatSpan(worked)}` : ending.description
 
+  const base = run.repository_ref?.default_branch
   return (
     <div className="space-y-4">
-      <p className="text-sm text-muted-foreground">{description}</p>
+      {description && <p className="text-sm text-muted-foreground">{description}</p>}
+      {ending.detail && (
+        <p className="text-sm leading-relaxed">
+          <InlineText text={ending.detail} />
+        </p>
+      )}
+      {ending.summary && <Summary text={ending.summary} />}
+      {ending.note && <p className="text-xs leading-5 text-muted-foreground">{ending.note}</p>}
       {evidence &&
         (evidence.source === "output" ? (
           <p className="font-mono text-xs leading-5 break-all text-destructive">{evidence.text}</p>
@@ -348,6 +368,12 @@ function Ending({ run, onOpenLog }: { run: Run; onOpenLog: () => void }) {
         <p className="text-sm text-muted-foreground">You accepted the solution, but the run couldn't finish.</p>
       )}
       <EndingActions run={run} actions={ending.actions} onOpenLog={onOpenLog} />
+      {ending.actions.includes("patch") && base && (
+        <p className="text-xs leading-5 text-muted-foreground">
+          Made against {base} as of {formatMoment(run.created_at)}. Apply it in your copy of the
+          repository with <code className="font-mono">git apply</code>.
+        </p>
+      )}
     </div>
   )
 }

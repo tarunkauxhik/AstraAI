@@ -30,15 +30,12 @@ type Reply = { status: number; body: unknown }
  * RunStatus inside the real polling hook, against a stubbed server: `server.run` is what
  * GET returns, so a test moves the server on by changing it, exactly as the app would see.
  */
-function renderStatus(run: Run, replies: { approval?: Reply; extend?: Reply; create?: Reply } = {}) {
+function renderStatus(run: Run, replies: { approval?: Reply; create?: Reply } = {}) {
   const server = { run }
   const calls = stubFetch((url, init) => {
     const method = init?.method ?? "GET"
     if (method === "POST" && url.endsWith("/approval")) {
       return replies.approval ?? { status: 202, body: { run_id: run.run_id, status: "running" } }
-    }
-    if (method === "POST" && url.endsWith("/approval/extend")) {
-      return replies.extend ?? { status: 200, body: { run_id: run.run_id, approval_expires_at: run.approval_expires_at } }
     }
     if (method === "POST" && url === "/api/runs") {
       return replies.create ?? { status: 202, body: { run_id: "next-run", status: "queued" } }
@@ -178,33 +175,14 @@ describe("review", () => {
 })
 
 describe("time to review", () => {
-  it("stays calm in minutes while there's plenty of time", () => {
-    renderStatus(review)
-    expect(screen.getByRole("timer").textContent).toBe("9 min")
-    expect(screen.queryByRole("button", { name: "More time" })).toBeNull()
-    expect(screen.getAllByRole("timer")).toHaveLength(1)
-  })
-
-  it("warns in the last two minutes and offers more time (WCAG 2.2.1)", async () => {
+  it("never hurries a decision that publishes nothing: no countdown, no more-time button", () => {
     const soon = waitingFor(waitingRun, { startedMsAgo: 500_000, expiresInMs: 90_000 })
-    const { posts } = renderStatus(soon)
+    renderStatus(soon)
 
-    expect(screen.getByRole("timer").textContent).toMatch(/^1:(29|30)$/)
-    expect(screen.getByRole("status").textContent).toMatch(/less than 2 minutes/)
-
-    await userEvent.click(screen.getByRole("button", { name: "More time" }))
-    expect(posts()).toEqual([{ url: `/api/runs/${soon.run_id}/approval/extend`, method: "POST", body: null }])
-  })
-
-  it("at zero, disables the decision and asks the server instead of deciding expiry itself", async () => {
-    const due = waitingFor(waitingRun, { startedMsAgo: 600_000, expiresInMs: 0 })
-    const { gets } = renderStatus(due)
-
-    expect(await screen.findByText("Checking whether the review window has closed…")).toBeTruthy()
-    expect((screen.getByRole("button", { name: "Accept" }) as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(true)
-    await waitFor(() => expect(gets().length).toBeGreaterThan(0))
-    expect(heading().textContent).toBe("Ready for review")
+    expect(screen.queryByRole("timer")).toBeNull()
+    expect(screen.queryByRole("button", { name: "More time" })).toBeNull()
+    expect(document.body.textContent).not.toMatch(/closes|minutes? left/i)
+    expect((screen.getByRole("button", { name: "Accept" }) as HTMLButtonElement).disabled).toBe(false)
   })
 })
 
@@ -214,7 +192,7 @@ describe("endings", () => {
     expect(heading().textContent).toBe("Accepted")
     expect(screen.getByText("All checks passed · 2m 00s")).toBeTruthy()
     expect(screen.getByRole("button", { name: "Copy solution.py" }).textContent).toBe("Copy solution")
-    expect(screen.getByRole("link", { name: "New run" })).toBeTruthy()
+    expect(screen.getByRole("link", { name: "New task" })).toBeTruthy()
     expect(document.body.textContent).not.toMatch(/You approved/)
   })
 
@@ -223,7 +201,7 @@ describe("endings", () => {
     expect(heading().textContent).toBe("Not reviewed in time")
     expect(screen.getByText(/All checks passed, but the review window closed/)).toBeTruthy()
     expect(screen.getByRole("button", { name: "Copy solution.py" })).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Run again" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy()
     expect(document.body.textContent).not.toMatch(/expired|failed/i)
   })
 
@@ -244,7 +222,7 @@ describe("endings", () => {
     expect(heading().textContent).toBe("Couldn't verify")
     expect(screen.getByText("1 of 2 tests failed after the available fixes.")).toBeTruthy()
     expect(screen.getByText("FAIL basic_word: expected 'cba', got 'abc'")).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Run again" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Edit task" })).toBeTruthy()
 
     await userEvent.click(screen.getByRole("button", { name: "Run log" }))
@@ -254,7 +232,7 @@ describe("endings", () => {
   it("runs the same task again in one click", async () => {
     const { posts, router } = renderStatus(sandboxUnavailableRun)
 
-    await userEvent.click(screen.getByRole("button", { name: "Run again" }))
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }))
 
     expect(posts()[0]).toEqual({
       url: "/api/runs",
@@ -267,10 +245,10 @@ describe("endings", () => {
   it("explains a busy service instead of failing silently", async () => {
     renderStatus(llmFailedRun, { create: { status: 429, body: { detail: "Too many runs are waiting. Try again shortly." } } })
 
-    await userEvent.click(screen.getByRole("button", { name: "Run again" }))
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }))
 
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "Couldn't start a new run. Too many runs are waiting. Try again shortly.",
+      "Couldn't start a new task. Too many runs are waiting. Try again shortly.",
     )
   })
 

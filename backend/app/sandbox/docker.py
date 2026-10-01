@@ -33,6 +33,15 @@ PASSED_TESTS = re.compile(r"^PASSED (\d+) tests", re.MULTILINE)
 FAILED_CASE = re.compile(r"^FAIL ", re.MULTILINE)
 # pytest's last line, e.g. "126 passed, 2 failed, 1 skipped in 3.10s".
 PYTEST_COUNT = re.compile(r"(\d+) (passed|failed|errors?)\b")
+# pytest -rfE ends with one "FAILED <id> - <message>" or "ERROR <id> ..." line per test.
+PYTEST_SUMMARY = "short test summary info"
+# The id has no spaces except inside its [parameters], which may hold " - " themselves.
+# A failing subtest is its own "SUBFAILED(<params>) <id>" line, and counts as a failure.
+PYTEST_FAILURE = re.compile(
+    r"(?:FAILED|ERROR|SUBFAILED\(.*?\)) (\S+?(?:\[.*?\])?)(?: - .*)?$"
+)
+# More failing ids than this are not worth keeping one by one.
+MAX_FAILED_TESTS = 500
 # pytest exit codes: 0 all passed, 1 some failed, 5 no tests collected. Anything else
 # (collection errors, internal or usage errors, no pytest) means the suite couldn't run.
 PYTEST_FAILED = 1
@@ -140,6 +149,34 @@ def build_archive(spec: LanguageSpec, generated_code: GeneratedCode) -> bytes:
     )
 
 
+def failed_tests(stdout: str, expected: int | None) -> list[str] | None:
+    """Every failing test's id from pytest's summary, or None if it can't be read whole.
+
+    The output keeps its end, where the summary is. A summary whose start was cut off, or
+    whose lines don't add up to pytest's own count, isn't trusted.
+    """
+    lines = stdout.splitlines()
+    start = next(
+        (
+            number
+            for number, line in enumerate(lines)
+            if line.startswith("=") and PYTEST_SUMMARY in line
+        ),
+        None,
+    )
+    if start is None:
+        return [] if expected == 0 else None
+    ids = [
+        match.group(1)
+        for line in lines[start + 1 :]
+        if (match := PYTEST_FAILURE.match(line))
+    ]
+    if (expected is not None and len(ids) != expected) or len(ids) > MAX_FAILED_TESTS:
+        return None
+    # A test with several failing subtests is still one failing test.
+    return list(dict.fromkeys(ids))
+
+
 def pytest_result(
     run: "Run", exit_code: int, out_of_memory: bool, elapsed_ms: int
 ) -> ExecutionResult:
@@ -160,6 +197,7 @@ def pytest_result(
         status, error_type = "failed", "environment_error"
     # Counts only mean something when the suite ran to its end.
     finished = status == "passed" or error_type == "test_failure"
+    failed = counts.get("failed", 0) + counts.get("error", 0) if finished else None
     return ExecutionResult(
         status=status,
         exit_code=exit_code,
@@ -167,11 +205,14 @@ def pytest_result(
         stderr=run.stderr,
         duration_ms=elapsed_ms,
         tests_passed=counts.get("passed", 0) if finished else None,
-        tests_failed=counts.get("failed", 0) + counts.get("error", 0)
-        if finished
-        else None,
+        tests_failed=failed,
         error_type=error_type,
         output_truncated=run.truncated,
+        # A collection error stops the run before any count, but its ERROR lines still
+        # name what broke. A time or memory limit leaves no summary at all.
+        failed_tests=failed_tests(run.stdout, failed)
+        if status in ("passed", "failed")
+        else None,
     )
 
 

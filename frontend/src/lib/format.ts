@@ -8,6 +8,14 @@ export function formatDateTime(iso: string): string {
   return Number.isNaN(date.getTime()) ? iso : dateTime.format(date)
 }
 
+const dateMinute = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
+
+/** A moment to the minute, e.g. "Oct 1, 2026, 12:32 AM": when it was, not a timestamp. */
+export function formatMoment(iso: string): string {
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? iso : dateMinute.format(date)
+}
+
 /** "342 ms", "4.2 s", "3m 07s". */
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))} ms`

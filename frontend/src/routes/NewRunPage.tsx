@@ -19,6 +19,37 @@ import { cn } from "@/lib/utils"
 const COUNTER_THRESHOLD = Math.floor(TASK_MAX_LENGTH * 0.9)
 
 const LANGUAGE_KEY = "astraai:language"
+const MODE_KEY = "astraai:mode"
+
+/** What each kind of task is, in one line under the choice. */
+const MODES: Record<Mode, { label: string; description: string }> = {
+  develop: {
+    label: "Change a repository",
+    description:
+      "Give AstraAi a repository and a small coding task. It makes the change, runs the tests, reviews it and gives you the patch.",
+  },
+  solve: {
+    label: "Solve a coding problem",
+    description: "Give AstraAi a standalone coding problem. It generates, tests and reviews a solution.",
+  },
+}
+
+/** The kind of task last started on this device; changing a repository at first. */
+function rememberedMode(): Mode {
+  try {
+    return window.localStorage.getItem(MODE_KEY) === "solve" ? "solve" : "develop"
+  } catch {
+    return "develop"
+  }
+}
+
+function rememberMode(mode: Mode) {
+  try {
+    window.localStorage.setItem(MODE_KEY, mode)
+  } catch {
+    // Remembering is a convenience only.
+  }
+}
 
 /** The last language used on this device. Storage can be blocked, so it's only a default. */
 function rememberedLanguage(): Language {
@@ -76,7 +107,10 @@ export function NewRunPage() {
   const createRun = useCreateRun()
   const [task, setTask] = useState(prefill.task ?? "")
   const [language, setLanguage] = useState<Language>(() => prefill.language ?? rememberedLanguage())
-  const [mode, setMode] = useState<Mode>(prefill.mode ?? "solve")
+  // A task being edited keeps its own kind; a solve request carries no mode.
+  const [mode, setMode] = useState<Mode>(
+    () => prefill.mode ?? (prefill.task !== undefined ? "solve" : rememberedMode()),
+  )
   const [repository, setRepository] = useState(prefill.repository ?? "")
   const [attempted, setAttempted] = useState(false)
   const develop = mode === "develop"
@@ -140,6 +174,7 @@ export function NewRunPage() {
   function chooseMode(value: string) {
     if (value !== "solve" && value !== "develop") return
     setMode(value)
+    rememberMode(value)
     setAttempted(false)
     createRun.reset()
   }
@@ -150,7 +185,7 @@ export function NewRunPage() {
     rememberLanguage(value)
   }
 
-  const describedBy = [!develop && hintId, showCounter && counterId, taskError && errorId]
+  const describedBy = [hintId, showCounter && counterId, taskError && errorId]
     .filter(Boolean)
     .join(" ")
 
@@ -160,76 +195,28 @@ export function NewRunPage() {
         <Brand />
       </header>
 
-      <main className="flex-1 pt-8 sm:pt-20">
+      <main className="flex-1 pt-8 sm:pt-16">
         <ServiceWarning />
+        <h1 className="mb-8 text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+          Describe a small change. Get a tested patch.
+        </h1>
         <form onSubmit={submit} noValidate className="space-y-5">
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            value={mode}
-            onValueChange={chooseMode}
-            aria-label="What AstraAi does"
-            className="w-full sm:w-auto"
-          >
-            <ToggleGroupItem value="solve" className={cn(CHOICE, "flex-1 sm:flex-none")}>
-              Solve a coding problem
-            </ToggleGroupItem>
-            <ToggleGroupItem value="develop" className={cn(CHOICE, "flex-1 sm:flex-none")}>
-              Develop a repository
-            </ToggleGroupItem>
-          </ToggleGroup>
-
           <div className="space-y-2">
-            <h1>
-              <label htmlFor={taskId} className="text-2xl font-semibold tracking-tight">
-                {develop ? "What do you want changed?" : "What do you want AstraAi to solve?"}
-              </label>
-            </h1>
-            {!develop && (
-              <p id={hintId} className="text-muted-foreground">
-                Describe one self-contained function. AstraAi writes tests and code, runs the
-                tests, and asks you to review the result.
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-2">
-            <Textarea
-              ref={textarea}
-              id={taskId}
-              value={task}
-              onChange={(event) => setTask(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) submit()
-              }}
-              placeholder={
-                develop
-                  ? "For example: add a --json flag to the report command."
-                  : "For example: write a function that returns the indices of the two numbers in a list that add up to a target."
-              }
-              rows={8}
-              aria-invalid={taskError ? true : undefined}
-              aria-describedby={describedBy}
-              className="min-h-44 resize-y text-base leading-7"
-            />
-            {(taskError || showCounter) && (
-              <div className="flex items-start justify-between gap-4 text-sm">
-                <p id={errorId} className="text-destructive">
-                  {taskError}
-                </p>
-                {showCounter && (
-                  <p
-                    id={counterId}
-                    className={cn(
-                      "shrink-0 font-mono text-xs text-muted-foreground",
-                      length > TASK_MAX_LENGTH && "text-destructive",
-                    )}
-                  >
-                    {length.toLocaleString()} / {TASK_MAX_LENGTH.toLocaleString()}
-                  </p>
-                )}
-              </div>
-            )}
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              value={mode}
+              onValueChange={chooseMode}
+              aria-label="What AstraAi does"
+              className="w-full sm:w-auto"
+            >
+              {(["develop", "solve"] as const).map((value) => (
+                <ToggleGroupItem key={value} value={value} className={cn(CHOICE, "flex-1 sm:flex-none")}>
+                  {MODES[value].label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+            <p className="text-sm text-muted-foreground">{MODES[mode].description}</p>
           </div>
 
           {develop && (
@@ -256,6 +243,53 @@ export function NewRunPage() {
               )}
             </div>
           )}
+
+          <div className="space-y-2">
+            <label htmlFor={taskId} className="text-sm font-medium">
+              {develop ? "What should change?" : "What should AstraAi solve?"}
+            </label>
+            <Textarea
+              ref={textarea}
+              id={taskId}
+              value={task}
+              onChange={(event) => setTask(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) submit()
+              }}
+              placeholder={
+                develop
+                  ? 'For example: parse_duration("1h30m") returns 90; it should return 5400. Fix it and add a regression test.'
+                  : "For example: write a function that returns the indices of the two numbers in a list that add up to a target."
+              }
+              rows={8}
+              aria-invalid={taskError ? true : undefined}
+              aria-describedby={describedBy}
+              className="min-h-44 resize-y text-base leading-7"
+            />
+            <p id={hintId} className="text-sm text-muted-foreground">
+              {develop
+                ? "Public Python repositories whose tests run with pytest without additional dependencies. Works on a copy. AstraAi never writes to GitHub."
+                : "Describe one self-contained function."}
+            </p>
+            {(taskError || showCounter) && (
+              <div className="flex items-start justify-between gap-4 text-sm">
+                <p id={errorId} className="text-destructive">
+                  {taskError}
+                </p>
+                {showCounter && (
+                  <p
+                    id={counterId}
+                    className={cn(
+                      "shrink-0 font-mono text-xs text-muted-foreground",
+                      length > TASK_MAX_LENGTH && "text-destructive",
+                    )}
+                  >
+                    {length.toLocaleString()} / {TASK_MAX_LENGTH.toLocaleString()}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
 
           {generalError && (
             <Alert variant="destructive">

@@ -50,10 +50,10 @@ describe("run page", () => {
     expect(status.compareDocumentPosition(solution) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it("has one countdown and one set of review actions", async () => {
+  it("has one set of review actions and no countdown", async () => {
     await renderRun(review)
 
-    expect(screen.getAllByRole("timer")).toHaveLength(1)
+    expect(screen.queryByRole("timer")).toBeNull()
     expect(screen.getAllByRole("group", { name: "Review actions" })).toHaveLength(1)
     expect(screen.getAllByRole("button", { name: "Accept" })).toHaveLength(1)
   })
@@ -73,7 +73,7 @@ describe("run page", () => {
     expect(screen.getByRole("heading", { level: 2, name: "Not reviewed in time" })).toBeTruthy()
     expect(screen.getByRole("region", { name: "solution.py" })).toBeTruthy()
     expect(screen.getByRole("heading", { name: "Tests" }).parentElement!.textContent).toBe("Tests2 passed")
-    expect(document.body.textContent).toContain("Verified")
+    expect(document.body.textContent).toContain("Checks passed")
   })
 
   it("opens the log by itself only when it explains the ending", async () => {

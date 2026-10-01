@@ -2,16 +2,24 @@ from langgraph.runtime import Runtime
 
 from app.context import data_block
 from app.llm import LLMOutputError
-from app.nodes.critic import DETERMINISTIC_FAILURES, INVALID_VERDICT, reconcile
-from app.state import AgentState, CriticResult, ExecutionResult, GraphContext
+from app.nodes.critic import DETERMINISTIC_FAILURES, INVALID_VERDICT, human_review
+from app.state import (
+    AgentState,
+    CriticResult,
+    ExecutionResult,
+    GraphContext,
+    SuiteComparison,
+)
 
 INSTRUCTIONS = """You review a change AstraAi made to a user's Python repository. From the \
 diff and the test results, decide whether it does what the user asked, correctly, without \
-unrelated changes.
+unrelated changes. Tests that already failed before the change say nothing against it.
 
 Choose exactly one verdict:
 - pass: the change does what was asked, and the evidence supports it.
-- code_failure: the change is wrong, incomplete, or changes unrelated things.
+- code_failure: the change is wrong, incomplete, changes unrelated things, or leaves \
+behind something it doesn't need, such as an unused import. Style preferences alone are \
+not a failure.
 - test_failure: a test the change added or updated is wrong, while the code is right.
 - execution_failure: there is no trustworthy test evidence.
 - ambiguous: the evidence cannot tell.
@@ -35,6 +43,17 @@ def summary(result: ExecutionResult | None) -> str:
     return f"{result.tests_passed} passed, {result.tests_failed} failed"
 
 
+def compared(checks: SuiteComparison | None) -> str:
+    """Which failures the change caused, by test id when pytest named them all."""
+    if checks is None or not checks.by_id:
+        return ""
+    newly = checks.broken + checks.new_failing
+    return (
+        f"Failing now but not before the change: {', '.join(newly) or 'none'}. "
+        f"Already failing before it: {len(checks.still_failing)}."
+    )
+
+
 async def review_changes(
     state: AgentState, runtime: Runtime[GraphContext]
 ) -> dict[str, CriticResult]:
@@ -55,10 +74,21 @@ async def review_changes(
         f"Task from the user:\n{state['task']}\n\n"
         f"Existing tests before the change: {summary(state.get('existing_tests'))}.\n"
         f"Tests after the change: {summary(verification)} "
-        f"(status {verification.status}).\n\n{data_block(evidence)}"
+        f"(status {verification.status}).\n{compared(state.get('checks'))}\n\n"
+        f"{data_block(evidence)}"
     )
     try:
         judged = await runtime.context.llm.generate(INSTRUCTIONS, prompt, CriticResult)
     except LLMOutputError:
         return {"critic_result": INVALID_VERDICT}
-    return {"critic_result": reconcile(judged, verification)}
+    # A "pass" never outvotes tests that fail where they didn't before. Tests that were
+    # already failing before the change say nothing against it.
+    checks = state.get("checks")
+    if judged.verdict == "pass" and (checks is None or not checks.clean):
+        return {
+            "critic_result": human_review(
+                "The review judged the change a pass, but tests fail that didn't "
+                "before it, so that verdict cannot be trusted."
+            )
+        }
+    return {"critic_result": judged}

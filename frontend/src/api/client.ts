@@ -1,6 +1,5 @@
 import type {
   ApprovalDecision,
-  ApprovalExtended,
   HealthResponse,
   Run,
   RunAccepted,
@@ -140,6 +139,6 @@ export const api = {
   decideApproval: (runId: string, decision: ApprovalDecision) =>
     postJson<RunAccepted>(`/runs/${encodeURIComponent(runId)}/approval`, { decision }),
 
-  extendApproval: (runId: string) =>
-    request<ApprovalExtended>(`/runs/${encodeURIComponent(runId)}/approval/extend`, { method: "POST" }),
+  /** A finished DEVELOP run's change as a patch file, downloaded by the browser itself. */
+  patchUrl: (runId: string) => `${API_BASE}/runs/${encodeURIComponent(runId)}/patch`,
 }

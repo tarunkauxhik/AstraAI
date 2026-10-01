@@ -4,7 +4,7 @@
  */
 import type { ApiError } from "@/api/client"
 import { NETWORK_ERROR_DETAIL } from "@/api/client"
-import type { ErrorCode, ExecutionResult, Run, RunRequest, RunStage } from "@/api/types"
+import type { DevelopOutcome, ErrorCode, ExecutionResult, Run, RunRequest, RunStage } from "@/api/types"
 import { formatCount } from "@/lib/format"
 import { describeFailure, STAGE_ACTIVITY, type FailureKind } from "@/lib/labels"
 
@@ -467,11 +467,17 @@ function developSteps(run: Run): WorkStep[] {
   const after = run.verification
   const again = run.first_attempt !== null
   return [
-    step("repository", stage === "fetching_repository", run.repository_ref !== null, [
-      "Reading the repository…",
-      "Repository read",
-      "Read the repository",
-    ]),
+    // A run only gets past this step once the repository passed AstraAi's checks.
+    {
+      ...step("repository", stage === "fetching_repository", run.repository_ref !== null, [
+        "Checking the repository…",
+        "Repository ready",
+        "Check the repository",
+      ]),
+      ...(run.repository_ref !== null && {
+        detail: "Public GitHub repository · Python project · pytest tests found",
+      }),
+    },
     {
       ...step("existing_tests", stage === "running_existing_tests", existing !== null, [
         "Running the existing tests…",
@@ -519,12 +525,26 @@ export function runRequest(run: Run): RunRequest {
 // Endings
 
 export type EndingTone = "success" | "attention" | "neutral"
-export type EndingAction = "copy" | "new_run" | "run_again" | "edit" | "log"
+export type EndingAction = "copy" | "patch" | "new_run" | "run_again" | "edit" | "log"
 
 export interface Ending {
-  kind: FailureKind | "accepted" | "expired" | "checked" | "changed" | "needs_review"
+  kind:
+    | FailureKind
+    | "accepted"
+    | "expired"
+    | "checked"
+    | "changed"
+    | "needs_review"
+    | "not_verified"
+    | "no_changes"
   title: string
   description: string
+  /** DEVELOP: why the outcome is what it is, from the evidence. */
+  detail?: string | null
+  /** DEVELOP: what AstraAi says the final change does. */
+  summary?: string
+  /** DEVELOP: that the one repair happened, and what caught the first change. */
+  note?: string | null
   tone: EndingTone
   actions: EndingAction[]
   /** The run log explains this ending, so it opens by itself. */
@@ -570,34 +590,143 @@ function unverifiedDescription(run: Run): string {
   return "AstraAi couldn't confirm that the solution is correct."
 }
 
+/** A pytest id as a person reads it: the test's own name, without its file or class. */
+export function testName(id: string): string {
+  return id.split("::").at(-1) ?? id
+}
+
+function testNames(ids: string[], max = 3): string {
+  const shown = ids.slice(0, max).map(testName).join(", ")
+  return ids.length > max ? `${shown} and ${ids.length - max} more` : shown
+}
+
 /**
- * DEVELOP: changes are ready for review only when the tests passed on them. Tests that still
- * fail, or couldn't run, leave changes that need the person's review. Either way the diff is
- * there to read: passing tests are evidence, not proof, and no review is a guarantee.
+ * How a DEVELOP run ended: the server decides it, tests first and the AI review second.
+ * Runs from before it did fall back to their final tests alone.
+ */
+export function developOutcome(run: Run): DevelopOutcome | null {
+  if (run.outcome !== null) return run.outcome
+  if (run.status !== "completed" || run.changes === null) return null
+  const after = run.verification ? verificationOutcome(run.verification) : "not_run"
+  return after === "passed" ? "ready" : after === "failed" ? "needs_review" : "not_verified"
+}
+
+/** Review verdicts that name a concrete problem; anything else isn't a finding. */
+export function reviewFinding(run: Run): string | null {
+  const review = run.critic_result
+  if (review === null || (review.verdict !== "code_failure" && review.verdict !== "test_failure")) {
+    return null
+  }
+  return firstSentence(review.code_issue || review.test_issue || review.reason)
+}
+
+/** Why changes need the person's review: the failing tests if any, otherwise the review's finding. */
+function reviewReason(run: Run): string | null {
+  const checks = run.checks
+  const after = run.verification
+  const reasons: string[] = []
+  if (checks?.by_id) {
+    if (checks.broken.length > 0) {
+      const count = checks.broken.length
+      reasons.push(
+        `${formatCount(count, "test")} that passed before ${count === 1 ? "fails" : "fail"} now: ${testNames(checks.broken)}.`,
+      )
+    }
+    if (checks.new_failing.length > 0) {
+      const count = checks.new_failing.length
+      reasons.push(
+        `${count === 1 ? "Its new test fails" : `${count} of its new tests fail`}: ${testNames(checks.new_failing)}.`,
+      )
+    }
+  } else if (after !== null && verificationOutcome(after) === "failed" && !checks?.clean) {
+    reasons.push(
+      after.tests_passed === null
+        ? "The tests stopped with an error before any test ran."
+        : `${formatCount(after.tests_failed ?? 0, "test")} failed after the change.`,
+    )
+  }
+  // Failing tests are the reason when there are any; the review's finding stays in the checks.
+  const finding = reviewFinding(run)
+  if (reasons.length === 0 && finding) reasons.push(`AI review flagged something to check: ${finding}`)
+  return reasons.length > 0 ? reasons.join(" ") : null
+}
+
+/** Why the tests say nothing about the changes. Never called a test failure. */
+function unverifiedReason(run: Run): string {
+  switch (run.verification?.status) {
+    case "timed_out":
+      return "The tests didn't finish within the time limit, so they say nothing about the changes."
+    case "resource_exceeded":
+      return "The tests hit a memory or process limit, so they say nothing about the changes."
+    default:
+      return "AstraAi couldn't start the tests, so they haven't run on the changes."
+  }
+}
+
+/** One line when the single repair happened: what caught the first change, never which attempt. */
+export function repairNote(run: Run): string | null {
+  const first = run.first_attempt
+  if (first === null) return null
+  const testsCaught = first.checks ? !first.checks.clean : first.verification.status !== "passed"
+  return testsCaught
+    ? "AstraAi found a failing test after its first change and corrected it before the final test run."
+    : "The AI review flagged a problem with AstraAi's first change, so it corrected it before the final test run."
+}
+
+/**
+ * DEVELOP: changes are ready for review only when the tests ran, nothing fails that didn't
+ * before, and the AI review raised nothing. Either way the diff and its patch are there:
+ * passing tests are evidence, not proof, and no review is a guarantee.
  */
 function describeDevelopEnding(run: Run): Ending {
-  if (run.status === "completed" && run.changes !== null) {
-    const after = run.verification
-    const files = `${formatCount(run.changes.files.length, "file")} changed`
-    const tests = after ? ` · Tests: ${verificationSummary(after)}` : ""
-    if (after !== null && verificationOutcome(after) === "passed") {
+  const summary = run.changes?.explanation ?? ""
+  const note = repairNote(run)
+  switch (developOutcome(run)) {
+    case "ready":
       return {
         kind: "changed",
         title: "Changes ready for review",
-        description: `${files}${tests}`,
+        description: "",
+        summary,
+        note,
         tone: "success",
-        actions: ["new_run"],
+        actions: ["patch"],
         openLog: false,
       }
-    }
-    return {
-      kind: "needs_review",
-      title: "Changes need your review",
-      description: `${files}${tests}`,
-      tone: "attention",
-      actions: ["run_again", "new_run"],
-      openLog: false,
-    }
+    case "needs_review":
+      return {
+        kind: "needs_review",
+        title: "Changes need your review",
+        description: "",
+        detail: reviewReason(run),
+        summary,
+        note,
+        tone: "attention",
+        actions: ["patch", "run_again"],
+        openLog: false,
+      }
+    case "not_verified":
+      return {
+        kind: "not_verified",
+        title: "AstraAi couldn't verify the changes",
+        description: "",
+        detail: unverifiedReason(run),
+        summary,
+        note,
+        tone: "attention",
+        actions: ["run_again", "patch"],
+        openLog: false,
+      }
+    case "no_changes":
+      return {
+        kind: "no_changes",
+        title: "No changes needed",
+        description: "",
+        summary: summary || "AstraAi found that nothing needed to change for this task.",
+        tone: "neutral",
+        actions: ["edit"],
+        openLog: false,
+      }
   }
   if (run.status === "completed") {
     // A run from before changes were made: it only checked the repository.

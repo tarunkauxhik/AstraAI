@@ -90,18 +90,23 @@ class LLMClient:
         )
 
     async def generate[T: BaseModel](
-        self, instructions: str, prompt: str, schema: type[T]
+        self,
+        instructions: str,
+        prompt: str,
+        schema: type[T],
+        timeout: float | None = None,
     ) -> T:
         """Return `schema` validated from a forced tool call, with bounded retries.
 
         Invalid output and transient gateway failures (5xx, 408, 429, connection errors)
         get another attempt after a linear backoff, or after a 429's short Retry-After.
-        Timeouts and other 4xx errors do not.
+        Timeouts and other 4xx errors do not. `timeout` replaces the configured per-call
+        timeout, for calls whose answers are known to be long.
         """
         attempt = 1
         while True:
             try:
-                return await self._generate_once(instructions, prompt, schema)
+                return await self._generate_once(instructions, prompt, schema, timeout)
             except RetryableLLMError as exc:
                 if attempt >= self._max_attempts:
                     logger.warning(
@@ -124,7 +129,11 @@ class LLMClient:
                 attempt += 1
 
     async def _generate_once[T: BaseModel](
-        self, instructions: str, prompt: str, schema: type[T]
+        self,
+        instructions: str,
+        prompt: str,
+        schema: type[T],
+        timeout: float | None = None,
     ) -> T:
         """One forced tool call whose parameters are `schema`, validated.
 
@@ -151,6 +160,7 @@ class LLMClient:
                         }
                     ],
                     tool_choice={"type": "function", "function": {"name": tool_name}},
+                    **({"timeout": timeout} if timeout is not None else {}),
                 )
         except openai.APITimeoutError as exc:
             logger.warning("LLM request timed out (model=%s)", self._model)

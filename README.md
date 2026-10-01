@@ -61,7 +61,7 @@ Fill in `backend/.env`:
 | `LLM_MAX_ATTEMPTS`    | Optional. Total attempts per LLM call, 1-5 (2)           |
 | `LLM_RETRY_BACKOFF_SECONDS` | Optional. Backoff × attempt number between tries; a 429's Retry-After up to 30s wins (1) |
 | `LLM_MAX_CONCURRENCY` | Optional. LLM requests in flight at once per process, 1-8 (2) |
-| `APPROVAL_TIMEOUT_SECONDS` | Optional. Seconds a verified solution waits for a human decision (restartable with more time) before the run expires, 5-86400 (600) |
+| `APPROVAL_TIMEOUT_SECONDS` | Optional. Seconds a verified solution waits for a human decision (restartable with more time) before the run expires, 5-86400 (86400, a day) |
 | `DATA_DIR` | Optional. Directory for the run and checkpoint databases (`backend/data`) |
 | `GITHUB_TOKEN` | Optional. Only for private repositories in Develop: a read-only fine-grained token (Contents: read). Public repositories need none |
 
@@ -109,6 +109,8 @@ Supported languages: `python`, `cpp`.
 | `POST /runs` | 429 | Queue full (`Retry-After: 30`) |
 | `GET /runs/{run_id}` | 200 | The run, with whatever results exist so far |
 | `GET /runs/{run_id}` | 404 | Unknown run |
+| `GET /runs/{run_id}/patch` | 200 | A finished Develop run's change as a patch for `git apply` (`text/x-diff`, a download) |
+| `GET /runs/{run_id}/patch` | 404 / 409 | Unknown run / no changes to download |
 | `POST /runs/{run_id}/approval` | 202 | `{"decision": "approve"}` resumes the run (`status: running`); `"reject"` ends it (`status: failed`) |
 | `POST /runs/{run_id}/approval` | 404 | Unknown run |
 | `POST /runs/{run_id}/approval` | 409 | Not waiting for approval: already decided, finished, or expired |
@@ -163,8 +165,14 @@ curl -X POST http://127.0.0.1:8000/runs \
   -d '{"task": "Add a --json flag.", "language": "python", "mode": "develop", "repository": "https://github.com/owner/name"}'
 ```
 
-1. **Read the repository.** Its default branch is resolved to its current commit, and the
-   repository is downloaded at exactly that commit (`repository_ref`).
+1. **Read and check the repository.** Its default branch is resolved to its current commit,
+   and the repository is downloaded at exactly that commit (`repository_ref`). Before any
+   sandbox run or model call, a deterministic check refuses a repository that clearly
+   doesn't fit: no Python files (`not_python`), no tests pytest would run, by its default
+   file names or a pytest configuration with a tests directory (`no_pytest_tests`), or
+   packages declared to install in `pyproject.toml`, `requirements.txt`, `setup.cfg` or
+   `setup.py`, other than pytest and lines with an environment marker
+   (`needs_dependencies`).
 2. **Run its existing tests** as-is with `python -m pytest` (`existing_tests`). If they
    can't run here at all, the run stops before any model call (`environment_unsupported`:
    usually a dependency, since nothing is installed).
@@ -174,22 +182,36 @@ curl -X POST http://127.0.0.1:8000/runs \
    the task's words when larger; 120,000 in all) and returns exact replacements. They are
    applied to the in-memory repository only if every one matches exactly once, in a file
    it was shown or a new file, never in CI, credential, deployment or infrastructure
-   files; otherwise nothing changes (`changes_not_applied`, `no_changes`,
-   `no_relevant_files`).
-5. **Run the tests again** on the changed repository (`verification`).
+   files; otherwise nothing changes (`changes_not_applied`, `no_relevant_files`). If the
+   model finds that nothing needs to change, the run ends there with its reason.
+5. **Run the tests again** on the changed repository (`verification`), and compare them with
+   the run before the change (`checks`): by pytest test id when pytest's summary names every
+   failure both times. Tests that already failed before the change don't count against
+   it; a test that passed before and fails now always does. Without those ids, only a run
+   where every test passed counts as clean.
 6. **Review the changes** (`critic_result`; a model "pass" never outvotes failing tests).
-7. **Repair once, if needed.** If the tests now fail where they didn't before, or they pass
+7. **Repair once, if needed.** If tests now fail that didn't before, or they pass
    but the review asks for a fix, the model gets one repair: the task, the changed files as
    they are now, the diff, the end of the test output and the review's findings, never
    the whole repository. Its exact edits go through the same checks, then steps 5 and 6
    run again and the run ends, whatever they show. A sandbox or limit problem never
    triggers a repair. The first change's tests and review are kept as `first_attempt`.
 
-A run that got this far ends `completed` with `changes`: one unified diff per changed file,
-always from the repository as downloaded to the final version, with an explanation. Its
-changes are ready for review when the final tests pass, and need the person's review when
-they still fail or couldn't run; a sandbox or limit problem is reported as tests that
-couldn't run, never as failures. Nothing is written to GitHub.
+A run that got this far ends `completed` with `changes` (one git-style diff per changed
+file, code first, then tests, then the rest, always from the repository as downloaded to
+the final version, with a short summary) and an `outcome`, decided from the tests first
+and the review second:
+
+| `outcome` | When |
+|---|---|
+| `ready` | The tests ran, nothing fails that didn't before, and the final review raised nothing. |
+| `needs_review` | Tests fail that didn't before, or the final review flagged something to check. |
+| `not_verified` | The tests couldn't run (time or memory limit, or no sandbox): never called a failure. |
+| `no_changes` | The model found nothing needs to change; `changes.explanation` says why. |
+
+`GET /runs/{run_id}/patch` returns the change as one patch file for plain `git apply`, built
+from the diff alone, never from the repository. Nothing is written to GitHub: no branch, no
+commit, no pull request.
 
 - **Repository data is untrusted.** The archive is read in memory, never extracted to
   disk: regular files only, no links or devices, no absolute or `..` paths, at most 20 MB

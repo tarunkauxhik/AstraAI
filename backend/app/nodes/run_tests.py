@@ -1,13 +1,22 @@
+from typing import Any
+
 from langgraph.runtime import Runtime
 
-from app.state import AgentState, ExecutionResult, GraphContext
+from app.checks import compare_tests
+from app.state import AgentState, GraphContext
 
 
 async def run_tests(
     state: AgentState, runtime: Runtime[GraphContext]
-) -> dict[str, ExecutionResult]:
-    """Run the repository's tests again, now against the changed snapshot."""
+) -> dict[str, Any]:
+    """Run the repository's tests again, now against the changed snapshot, and compare
+    them with the run before any change."""
     snapshot = runtime.context.snapshots.get(state["run_id"])
-    if snapshot is None or state.get("changes") is None:
+    changes, existing = state.get("changes"), state.get("existing_tests")
+    if snapshot is None or changes is None or existing is None:
         raise ValueError("run_tests needs the changed snapshot from edit_code")
-    return {"verification": await runtime.context.sandbox.run_repository(snapshot)}
+    verification = await runtime.context.sandbox.run_repository(snapshot)
+    return {
+        "verification": verification,
+        "checks": compare_tests(existing, verification, changes),
+    }

@@ -30,6 +30,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, computed_field
 
+from app.checks import Outcome, develop_outcome
 from app.llm import LLMError, LLMTimeoutError
 from app.repair import route_repair
 from app.repository import RepositoryError
@@ -47,6 +48,7 @@ from app.state import (
     Mode,
     RepositoryRef,
     Requirements,
+    SuiteComparison,
 )
 
 if TYPE_CHECKING:
@@ -131,6 +133,7 @@ RESULT_FIELDS = frozenset(
         "changes",
         "verification",
         "first_attempt",
+        "checks",
     }
 )
 
@@ -165,6 +168,10 @@ class Run(BaseModel):
     verification: ExecutionResult | None = None
     # DEVELOP: the first change's tests and review, when one repair replaced that change.
     first_attempt: FirstAttempt | None = None
+    # DEVELOP: the tests after the change compared with before it, and how the run ended:
+    # decided here, from the tests first and the review second.
+    checks: SuiteComparison | None = None
+    outcome: Outcome | None = None
     created_at: datetime
     updated_at: datetime
     requirements: Requirements | None = None
@@ -745,8 +752,9 @@ class RunManager:
         )
 
     def _finish_develop(self, run_id: str) -> None:
-        """A DEVELOP run completes once it has changes and has tested them, whatever the
-        tests showed: failing tests are evidence for the reviewer, not a failed run.
+        """A DEVELOP run completes once it has tested its changes, or decided nothing
+        needed to change, whatever the tests showed: failing tests are evidence for the
+        reviewer, not a failed run. Its outcome says which it was.
 
         It fails when the existing tests couldn't run at all (no sandbox, or a repository
         this environment can't run), since then nothing could verify a change.
@@ -764,7 +772,13 @@ class RunManager:
                     update={"stdout": "", "stderr": ""}
                 )
             self._update(
-                run_id, status="completed", stage="completed", verification=verification
+                run_id,
+                status="completed",
+                stage="completed",
+                verification=verification,
+                outcome=develop_outcome(
+                    run.changes, verification, run.checks, run.critic_result
+                ),
             )
             return
         result = run.existing_tests

@@ -94,6 +94,9 @@ export const KNOWN_ERROR_CODES = [
   "github_unavailable",
   "repository_too_large",
   "repository_unsupported",
+  "not_python",
+  "no_pytest_tests",
+  "needs_dependencies",
   "environment_unsupported",
   "no_relevant_files",
   "no_changes",
@@ -161,6 +164,8 @@ export interface ExecutionResult {
   tests_failed: number | null
   error_type: ExecutionErrorType | null
   output_truncated: boolean
+  /** A repository's pytest run: every failing test's id, or null if pytest's summary couldn't be read whole. */
+  failed_tests?: string[] | null
 }
 
 export interface CriticResult {
@@ -208,9 +213,28 @@ export interface ChangeSet {
 }
 
 /** DEVELOP: how the first change fared, once one repair replaced it. */
+/** DEVELOP: the tests after the change, compared with before it (by pytest id when `by_id`). */
+export interface SuiteComparison {
+  by_id: boolean
+  /** The tests ran, and nothing fails now that didn't before the change. */
+  clean: boolean
+  broken: string[]
+  new_failing: string[]
+  still_failing: string[]
+  fixed: string[]
+  added: number | null
+}
+
+/** How a DEVELOP run ended, decided by the server: tests first, the AI review second. */
+export type DevelopOutcome = "ready" | "needs_review" | "not_verified" | "no_changes"
+
 export interface FirstAttempt {
   verification: ExecutionResult
   review: CriticResult
+  checks?: SuiteComparison | null
+  explanation?: string
+  /** What the one repair corrected. */
+  fix?: string
 }
 
 export interface RunError {
@@ -236,6 +260,8 @@ export interface Run {
   verification: ExecutionResult | null
   /** DEVELOP: the first change's tests and review, when one repair replaced that change. */
   first_attempt: FirstAttempt | null
+  checks: SuiteComparison | null
+  outcome: DevelopOutcome | null
   created_at: string
   updated_at: string
   requirements: Requirements | null

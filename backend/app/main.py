@@ -1,12 +1,14 @@
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from pydantic import BaseModel, StringConstraints, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
+from app.changes import patch
 from app.config import Settings, get_settings
 from app.github import GitHub
 from app.graph import build_checkpointer, build_develop_graph, build_graph
@@ -217,6 +219,35 @@ async def extend_approval(
     except RunManagerStoppedError as exc:
         raise shutting_down() from exc
     return ApprovalExtended.model_validate(extended, from_attributes=True)
+
+
+@app.get("/runs/{run_id}/patch")
+async def get_patch(
+    run_id: str, runs: Annotated[RunManager, Depends(get_run_manager)]
+) -> Response:
+    """A finished DEVELOP run's change as one patch for `git apply`: the repository as
+    downloaded to the final files. Built from the diff alone, never from the repository."""
+    found = runs.get(run_id)
+    if found is None:
+        raise run_not_found()
+    if found.status != "completed" or found.changes is None or not found.changes.files:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This run has no changes to download.",
+        )
+    repository = found.repository_ref.full_name if found.repository_ref else "changes"
+    # Only safe characters reach the header, whatever a repository name holds.
+    name = re.sub(
+        r"[^A-Za-z0-9._-]", "-", f"{repository.split('/')[-1]}-{found.run_id[:8]}"
+    )
+    return Response(
+        patch(found.changes),
+        media_type="text/x-diff; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="astraai-{name}.patch"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/runs/{run_id}")

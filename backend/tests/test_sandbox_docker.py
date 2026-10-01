@@ -468,6 +468,8 @@ def test_a_repositorys_existing_tests_run_as_they_are() -> None:
     assert (result.status, result.error_type) == ("failed", "test_failure")
     assert (result.tests_passed, result.tests_failed) == (2, 1)
     assert "FAILED tests/test_calc.py::test_wrong" in result.stdout
+    # Every failure by its pytest id, from the real pytest's own summary.
+    assert result.failed_tests == ["tests/test_calc.py::test_wrong"]
 
 
 @pytest.mark.usefixtures("develop_image")
@@ -485,6 +487,7 @@ def test_the_pinned_python_and_pytest_run_with_no_credentials() -> None:
     )
 
     assert (result.status, result.tests_passed, result.tests_failed) == ("passed", 2, 0)
+    assert result.failed_tests == []
 
 
 @pytest.mark.usefixtures("develop_image")
@@ -520,6 +523,8 @@ def test_dependencies_are_never_installed() -> None:
     assert (result.status, result.error_type) == ("failed", "environment_error")
     assert (result.tests_passed, result.tests_failed) == (None, None)
     assert "No module named 'requests'" in result.stdout
+    # What broke is still named, though nothing could be counted.
+    assert result.failed_tests == ["test_uses_requests.py"]
 
 
 @pytest.mark.usefixtures("develop_image")

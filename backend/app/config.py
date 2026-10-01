@@ -49,7 +49,8 @@ class Settings(BaseSettings):
     develop_run_timeout_seconds: float = Field(default=900, ge=60, le=3600)
     # How long a verified solution waits for a human decision before the run expires.
     # Separate from run_timeout_seconds, which counts active work only.
-    approval_timeout_seconds: float = Field(default=600, ge=5, le=86_400)
+    # A day: accepting publishes nothing, so a review is never hurried.
+    approval_timeout_seconds: float = Field(default=86_400, ge=5, le=86_400)
     # Durable run records and graph checkpoints (two SQLite files). Must outlive the process,
     # so in a container it is a mounted volume, never the image's own filesystem.
     data_dir: Path = BACKEND_DIR / "data"

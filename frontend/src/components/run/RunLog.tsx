@@ -234,6 +234,12 @@ export function RunLog({
           {!solve && run.first_attempt && (
             <Part title="Before the fix">
               <div className="space-y-4">
+                {run.first_attempt.fix && (
+                  <p className="text-sm">
+                    <span className="text-muted-foreground">Corrected: </span>
+                    <InlineText text={run.first_attempt.fix} />
+                  </p>
+                )}
                 <Execution
                   result={run.first_attempt.verification}
                   historical

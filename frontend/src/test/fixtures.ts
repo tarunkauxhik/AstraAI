@@ -5,6 +5,7 @@
  */
 import type {
   ChangeSet,
+  SuiteComparison,
   CriticResult,
   ExecutionResult,
   GeneratedCode,
@@ -122,6 +123,8 @@ const BASE: Run = {
   changes: null,
   verification: null,
   first_attempt: null,
+  checks: null,
+  outcome: null,
   created_at: CREATED,
   updated_at: CREATED,
   requirements: null,
@@ -436,6 +439,17 @@ export const developEnvironmentRun = run({
   },
 })
 
+export const developUnsupportedRun = run({
+  ...developFetchingRun,
+  status: "failed",
+  stage: "failed",
+  error: {
+    code: "no_pytest_tests",
+    message: "AstraAi couldn't find tests in this repository that pytest would run.",
+    stage: "fetching_repository",
+  },
+})
+
 export const developNotPublicRun = run({
   ...DEVELOP,
   status: "failed",
@@ -494,6 +508,22 @@ export const developMakingChangesRun = run({
   existing_tests: EXISTING_TESTS_PASSED,
 })
 
+const NEW_TEST = "tests/test_cli.py::test_json"
+
+/** The server's comparison of the tests after a change with before it. */
+export function comparison(overrides: Partial<SuiteComparison> = {}): SuiteComparison {
+  return {
+    by_id: true,
+    clean: true,
+    broken: [],
+    new_failing: [],
+    still_failing: [],
+    fixed: [],
+    added: 1,
+    ...overrides,
+  }
+}
+
 export const developChangedRun = run({
   ...developMakingChangesRun,
   status: "completed",
@@ -501,33 +531,70 @@ export const developChangedRun = run({
   changes: CHANGES,
   verification: TESTS_AFTER_PASSED,
   critic_result: PASS_VERDICT,
+  checks: comparison(),
+  outcome: "ready",
 })
+
+const CODE_FINDING: CriticResult = {
+  verdict: "code_failure",
+  reason: "The flag is parsed after the arguments are read.",
+  code_issue: "--json is added after parse_args runs.",
+  test_issue: "",
+  recommended_action: "revise_code",
+}
 
 export const developChangedFailingRun = run({
   ...developChangedRun,
-  verification: TESTS_AFTER_FAILED,
-  critic_result: {
-    verdict: "code_failure",
-    reason: "The flag is parsed after the arguments are read.",
-    code_issue: "--json is added after parse_args runs.",
-    test_issue: "",
-    recommended_action: "revise_code",
+  verification: { ...TESTS_AFTER_FAILED, failed_tests: [NEW_TEST] },
+  critic_result: CODE_FINDING,
+  checks: comparison({ clean: false, new_failing: [NEW_TEST] }),
+  outcome: "needs_review",
+})
+
+export const developBrokeExistingRun = run({
+  ...developChangedFailingRun,
+  verification: { ...TESTS_AFTER_FAILED, failed_tests: ["tests/test_report.py::TestTable::test_columns"] },
+  critic_result: PASS_VERDICT,
+  checks: comparison({ clean: false, broken: ["tests/test_report.py::TestTable::test_columns"] }),
+})
+
+export const developReviewFlaggedRun = run({
+  ...developChangedRun,
+  critic_result: CODE_FINDING,
+  outcome: "needs_review",
+})
+
+export const developAlreadyFailingRun = run({
+  ...developChangedRun,
+  existing_tests: EXISTING_TESTS_FAILING,
+  verification: {
+    ...EXISTING_TESTS_FAILING,
+    stdout: "2 failed, 127 passed in 3.30s\n",
+    tests_passed: 127,
+    failed_tests: ["tests/test_api.py::test_timeout", "tests/test_api.py::test_retry"],
   },
+  checks: comparison({ still_failing: ["tests/test_api.py::test_retry", "tests/test_api.py::test_timeout"] }),
 })
 
 export const developChangedNotRunRun = run({
   ...developChangedRun,
   verification: { ...INFRASTRUCTURE_ERROR },
   critic_result: null,
+  checks: comparison({ by_id: false, clean: false, added: null }),
+  outcome: "not_verified",
+})
+
+export const developTimedOutRun = run({
+  ...developChangedNotRunRun,
+  verification: { ...INFRASTRUCTURE_ERROR, status: "timed_out", error_type: "timeout" },
 })
 
 // The one repair: the first change's tests failed, AstraAi fixes it, then tests it again.
-const FIRST_REVIEW = developChangedFailingRun.critic_result!
-
 export const developFixingRun = run({
   ...developChangedFailingRun,
   status: "running",
   stage: "fixing_issue",
+  outcome: null,
 })
 
 export const developRetestingRun = run({
@@ -535,8 +602,16 @@ export const developRetestingRun = run({
   stage: "running_tests",
   verification: null,
   critic_result: null,
+  checks: null,
   revision_count: 1,
-  first_attempt: { verification: TESTS_AFTER_FAILED, review: FIRST_REVIEW },
+  changes: { ...CHANGES, explanation: "Adds a --json flag that prints the report as JSON, with a test." },
+  first_attempt: {
+    verification: developChangedFailingRun.verification!,
+    review: CODE_FINDING,
+    checks: developChangedFailingRun.checks,
+    explanation: "Adds a --json flag.",
+    fix: "The flag is now added before the arguments are parsed.",
+  },
 })
 
 export const developRepairedRun = run({
@@ -545,23 +620,27 @@ export const developRepairedRun = run({
   stage: "completed",
   verification: TESTS_AFTER_PASSED,
   critic_result: PASS_VERDICT,
+  checks: comparison(),
+  outcome: "ready",
 })
 
 export const developRepairFailedRun = run({
   ...developRepairedRun,
-  verification: TESTS_AFTER_FAILED,
-  critic_result: FIRST_REVIEW,
+  verification: developChangedFailingRun.verification,
+  critic_result: CODE_FINDING,
+  checks: developChangedFailingRun.checks,
+  outcome: "needs_review",
 })
 
-export const developNoUsefulChangesRun = run({
+export const developNoChangesNeededRun = run({
   ...developMakingChangesRun,
-  status: "failed",
-  stage: "failed",
-  error: {
-    code: "no_changes",
-    message: "AstraAi didn't find anything to change for this task.",
-    stage: "making_changes",
+  status: "completed",
+  stage: "completed",
+  changes: {
+    files: [],
+    explanation: "The report command already has a --json flag, with tests, so nothing needs to change.",
   },
+  outcome: "no_changes",
 })
 
 export const developNotAppliedRun = run({

@@ -9,11 +9,18 @@ import { stubFetch } from "@/test/render"
 
 // U+1F600 is one code point (what the backend's Python len() counts) but two UTF-16 units.
 const EMOJI = "\u{1F600}"
-const QUESTION = "What do you want AstraAi to solve?"
+const QUESTION = "What should AstraAi solve?"
+const PROMISE = "Describe a small change. Get a tested patch."
 
 afterEach(() => window.localStorage.clear())
 
-function renderPage({ healthy = true, state }: { healthy?: boolean; state?: unknown } = {}) {
+/** The start page, on a device whose last task was solving a problem unless told otherwise. */
+function renderPage({
+  healthy = true,
+  state,
+  mode = "solve",
+}: { healthy?: boolean; state?: unknown; mode?: "solve" | "develop" | null } = {}) {
+  if (mode) window.localStorage.setItem("astraai:mode", mode)
   const calls = stubFetch((url) =>
     url === "/api/runs"
       ? { status: 202, body: { run_id: "new-run", status: "queued" } }
@@ -34,7 +41,7 @@ function renderPage({ healthy = true, state }: { healthy?: boolean; state?: unkn
       <RouterProvider router={router} />
     </QueryClientProvider>,
   )
-  const task = screen.getByRole("textbox", { name: QUESTION })
+  const task = screen.queryByRole("textbox", { name: QUESTION })!
   const submit = () => fireEvent.click(screen.getByRole("button", { name: "Solve" }))
   const posts = () => calls.filter((call) => call.method === "POST")
   return { task, submit, posts }
@@ -44,7 +51,9 @@ describe("new run", () => {
   it("is one question, a task box, a language choice and one action", () => {
     renderPage()
 
-    expect(screen.getByRole("heading", { level: 1, name: QUESTION })).toBeTruthy()
+    expect(screen.getByRole("heading", { level: 1, name: PROMISE })).toBeTruthy()
+    expect(screen.getByRole("textbox", { name: QUESTION })).toBeTruthy()
+    expect(screen.getByText(/It generates, tests and reviews a solution/)).toBeTruthy()
     expect(screen.getByText(/Describe one self-contained function/)).toBeTruthy()
     expect(screen.getByRole("radiogroup", { name: "Language" })).toBeTruthy()
     const solve = screen.getByRole("button", { name: "Solve" })
@@ -53,6 +62,27 @@ describe("new run", () => {
     expect(solve.querySelector("kbd")?.textContent).toMatch(/↵/)
     // No flow chips, counter or service chatter while everything is fine.
     expect(document.body.textContent).not.toMatch(/sandbox|20,000|Service online|Sandbox run/i)
+  })
+
+  it("says what AstraAi does first, and starts with changing a repository", () => {
+    renderPage({ mode: null })
+
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe(PROMISE)
+    const kinds = screen.getAllByRole("radio").slice(0, 2)
+    expect(kinds.map((kind) => kind.textContent)).toEqual(["Change a repository", "Solve a coding problem"])
+    expect(kinds[0].getAttribute("aria-checked")).toBe("true")
+    expect(document.body.textContent).not.toMatch(/Develop a repository/)
+  })
+
+  it("remembers the kind of task last started on this device", () => {
+    renderPage({ mode: null })
+    fireEvent.click(screen.getByRole("radio", { name: "Solve a coding problem" }))
+    expect(window.localStorage.getItem("astraai:mode")).toBe("solve")
+
+    cleanup()
+    window.localStorage.removeItem("astraai:language")
+    renderPage({ mode: null })
+    expect(screen.getByRole("radio", { name: "Solve a coding problem" }).getAttribute("aria-checked")).toBe("true")
   })
 
   it("submits with Ctrl+Enter from the task box", async () => {
@@ -65,7 +95,11 @@ describe("new run", () => {
   })
 
   it("opens with the task and language of a run being edited", () => {
-    const { task } = renderPage({ state: { task: "Reverse a string, keeping emoji intact.", language: "cpp" } })
+    // Editing a solved problem stays a problem, whatever this device did last.
+    const { task } = renderPage({
+      mode: "develop",
+      state: { task: "Reverse a string, keeping emoji intact.", language: "cpp" },
+    })
 
     expect((task as HTMLTextAreaElement).value).toBe("Reverse a string, keeping emoji intact.")
     expect(screen.getByRole("radio", { name: "C++" }).getAttribute("aria-checked")).toBe("true")

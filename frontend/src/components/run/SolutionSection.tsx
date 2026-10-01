@@ -81,19 +81,20 @@ function Approach({ text }: { text: string }) {
   )
 }
 
-/** Whether this exact code passed its checks, attached to the code itself. */
+/** Whether this exact code passed its checks, attached to the code itself. Never a promise of
+ * correctness: AstraAi wrote these tests itself. */
 function CodeStatusLabel({ status, final }: { status: CodeStatus; final: boolean }) {
   if (status === "verified") {
     return (
       <span className="flex items-center gap-1 font-medium text-success">
         <Check className="size-3.5" aria-hidden="true" />
-        Verified
+        Checks passed
       </span>
     )
   }
   if (status === "checking") return <span>Checking…</span>
   // Still being worked on, it's just a draft; once the run is over it needs attention.
-  return <span className={cn(final && "font-medium text-warning")}>Not verified</span>
+  return <span className={cn(final && "font-medium text-warning")}>Checks not passed</span>
 }
 
 export function SolutionSection({ run }: { run: Run }) {

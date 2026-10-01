@@ -147,10 +147,12 @@ def test_the_diff_is_a_normal_unified_diff_of_changed_files_only() -> None:
         ("pkg/new.py", "added", 1, 0),
     ]
     assert changes.files[0].diff == (
+        "diff --git a/pkg/core.py b/pkg/core.py\n"
         "--- a/pkg/core.py\n+++ b/pkg/core.py\n@@ -3,4 +3,4 @@\n \n \n def mul(a, b):\n"
         "-    return a * b\n+    return b * a\n"
     )
     assert changes.files[1].diff == (
+        "diff --git a/pkg/new.py b/pkg/new.py\nnew file mode 100644\n"
         "--- /dev/null\n+++ b/pkg/new.py\n@@ -0,0 +1 @@\n+NEW = True\n"
         "\\ No newline at end of file\n"
     )

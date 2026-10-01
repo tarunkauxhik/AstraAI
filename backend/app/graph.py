@@ -37,6 +37,7 @@ from app.state import (
     GraphContext,
     RepositoryRef,
     Requirements,
+    SuiteComparison,
 )
 
 # Every application type stored in checkpoints, allowlisted for msgpack deserialization.
@@ -51,6 +52,7 @@ CHECKPOINTED_MODELS = (
     ChangeSet,
     FileChange,
     FirstAttempt,
+    SuiteComparison,
 )
 
 
@@ -126,6 +128,12 @@ def existing_tests_ran(state: AgentState) -> str:
     return "understand_task" if ran else END
 
 
+def changed(state: AgentState) -> str:
+    """Test a change that was made. If nothing needed to change, the run ends with why."""
+    changes = state.get("changes")
+    return "run_tests" if changes is not None and changes.files else END
+
+
 def repaired(state: AgentState) -> str:
     """Test and review a repair that was made; if none could be, the first change stands."""
     return "run_tests" if state.get("first_attempt") is not None else END
@@ -154,7 +162,9 @@ def build_develop_graph(checkpointer: BaseCheckpointSaver | None) -> CompiledSta
         {"understand_task": "understand_task", END: END},
     )
     builder.add_edge("understand_task", "edit_code")
-    builder.add_edge("edit_code", "run_tests")
+    builder.add_conditional_edges(
+        "edit_code", changed, {"run_tests": "run_tests", END: END}
+    )
     builder.add_edge("run_tests", "review_changes")
     builder.add_conditional_edges(
         "review_changes",

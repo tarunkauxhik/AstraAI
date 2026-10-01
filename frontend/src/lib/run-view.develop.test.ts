@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { Run } from "@/api/types"
 import {
   announcement,
+  repairNote,
   describeEnding,
   existingTestsSummary,
   hasRunLog,
@@ -25,7 +26,13 @@ import {
   developRepairedRun,
   developRepairFailedRun,
   developRetestingRun,
-  developNoUsefulChangesRun,
+  developNoChangesNeededRun,
+  developAlreadyFailingRun,
+  developBrokeExistingRun,
+  developReviewFlaggedRun,
+  developTimedOutRun,
+  comparison,
+  CHANGES,
   developNotAppliedRun,
   developNotPublicRun,
   developTestingRun,
@@ -52,7 +59,7 @@ describe("develop work steps", () => {
 
   it("reads the repository, checks its tests, then understands, changes, tests and reviews", () => {
     expect(steps(developFetchingRun)).toEqual([
-      ["current", "Reading the repository…"],
+      ["current", "Checking the repository…"],
       ["pending", "Run the existing tests"],
       ["pending", "Understand the task"],
       ["pending", "Make the changes"],
@@ -60,7 +67,7 @@ describe("develop work steps", () => {
       ["pending", "Review the changes"],
     ])
     expect(steps(developMakingChangesRun)).toEqual([
-      ["done", "Repository read"],
+      ["done", "Repository ready"],
       ["done", "Existing tests: 128 passed"],
       ["done", "Task understood"],
       ["current", "Making changes…"],
@@ -98,39 +105,85 @@ describe("verification after the change", () => {
   })
 })
 
-describe("the three outcomes", () => {
+describe("outcomes", () => {
+  it("ready: what AstraAi did, then the patch; no claim beyond the evidence", () => {
+    const ending = describeEnding(developChangedRun)
+
+    expect([ending.title, ending.tone, ending.detail]).toEqual(["Changes ready for review", "success", undefined])
+    expect(ending.summary).toBe(CHANGES.explanation)
+    expect(ending.actions).toEqual(["patch"])
+    expect(JSON.stringify(ending)).not.toMatch(/verified|confiden|score/i)
+  })
+
+  it("tests that already failed before the change don't stop it being ready", () => {
+    expect(describeEnding(developAlreadyFailingRun).title).toBe("Changes ready for review")
+  })
+
   it.each([
-    [developChangedRun, "Changes ready for review", "2 files changed · Tests: 129 passed", "success"],
-    [developRepairedRun, "Changes ready for review", "2 files changed · Tests: 129 passed", "success"],
-    [
-      developChangedFailingRun,
-      "Changes need your review",
-      "2 files changed · Tests: 128 passed · 1 failed",
-      "attention",
-    ],
-    [
-      developRepairFailedRun,
-      "Changes need your review",
-      "2 files changed · Tests: 128 passed · 1 failed",
-      "attention",
-    ],
-    [developChangedNotRunRun, "Changes need your review", "2 files changed · Tests: couldn't run", "attention"],
-  ])("%#", (run, title, description, tone) => {
+    [developChangedFailingRun, /^Its new test fails: test_json\.$/],
+    [developBrokeExistingRun, /^1 test that passed before fails now: test_columns\.$/],
+    [developReviewFlaggedRun, /^AI review flagged something to check: --json is added after parse_args runs\.$/],
+  ])("needs your review, saying why: %#", (run, reason) => {
     const ending = describeEnding(run)
 
-    expect([ending.title, ending.description, ending.tone]).toEqual([title, description, tone])
-    expect(announcement(run)).toBe(title)
+    expect([ending.title, ending.tone]).toEqual(["Changes need your review", "attention"])
+    expect(ending.detail).toMatch(reason)
+    expect(ending.actions).toEqual(["patch", "run_again"])
+    expect(announcement(run)).toBe("Changes need your review")
   })
 
-  it("no useful changes only when nothing needed to change", () => {
-    expect(describeEnding(developNoUsefulChangesRun).title).toBe("No useful changes")
-    expect(describeEnding(developNotAppliedRun).title).toBe("No changes made")
+  it.each([
+    [developChangedNotRunRun, "AstraAi couldn't start the tests"],
+    [developTimedOutRun, "The tests didn't finish within the time limit"],
+  ])("couldn't verify is never a test failure: %#", (run, reason) => {
+    const ending = describeEnding(run)
+
+    expect(ending.title).toBe("AstraAi couldn't verify the changes")
+    expect(ending.detail).toContain(reason)
+    expect(ending.detail).not.toMatch(/fail/)
   })
 
-  it("changes that couldn't be made offer to reword the task", () => {
+  it("no changes needed, with AstraAi's reason", () => {
+    const ending = describeEnding(developNoChangesNeededRun)
+
+    expect([ending.title, ending.summary]).toEqual([
+      "No changes needed",
+      "The report command already has a --json flag, with tests, so nothing needs to change.",
+    ])
+    expect(ending.actions).toEqual(["edit"])
+  })
+
+  it("changes that couldn't be made are not called unnecessary", () => {
     const ending = describeEnding(developNotAppliedRun)
 
     expect([ending.title, ending.actions]).toEqual(["No changes made", ["edit", "run_again"]])
+  })
+
+  it("a run from before the server decided outcomes falls back to its final tests", () => {
+    const legacy = { ...developChangedFailingRun, outcome: null, checks: null }
+
+    expect(describeEnding(legacy).title).toBe("Changes need your review")
+    expect(describeEnding({ ...developChangedRun, outcome: null, checks: null }).title).toBe(
+      "Changes ready for review",
+    )
+  })
+})
+
+describe("the repair, after the fact", () => {
+  it("is one line about what caught the first change, never an attempt number", () => {
+    expect(repairNote(developRepairedRun)).toBe(
+      "AstraAi found a failing test after its first change and corrected it before the final test run.",
+    )
+    expect(repairNote(developChangedRun)).toBeNull()
+    const caughtByReview = {
+      ...developRepairedRun,
+      first_attempt: { ...developRepairedRun.first_attempt!, checks: comparison() },
+    }
+    expect(repairNote(caughtByReview)).toMatch(/^The AI review flagged a problem/)
+  })
+
+  it("keeps the summary of the final change, not the repair's story", () => {
+    expect(describeEnding(developRepairedRun).summary).toBe(developRepairedRun.changes!.explanation)
   })
 })
 

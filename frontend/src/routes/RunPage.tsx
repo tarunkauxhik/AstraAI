@@ -5,7 +5,7 @@ import { Link, useParams } from "react-router"
 import type { ApiError } from "@/api/client"
 import type { Run } from "@/api/types"
 import { Brand } from "@/components/Brand"
-import { ChangesSection, VerificationSection } from "@/components/run/DevelopSections"
+import { ChangesSection, ChecksSection } from "@/components/run/DevelopSections"
 import { RunLog } from "@/components/run/RunLog"
 import { RunStatus } from "@/components/run/RunStatus"
 import { SolutionSection } from "@/components/run/SolutionSection"
@@ -25,7 +25,7 @@ function AppHeader() {
       <Button asChild variant="ghost" size="sm" className="-mr-2 pointer-coarse:h-11">
         <Link to="/">
           <Plus aria-hidden="true" />
-          New run
+          New task
         </Link>
       </Button>
     </header>
@@ -95,10 +95,12 @@ function RunView({ run, connectionError }: { run: Run; connectionError: ApiError
   const [logChoice, setLogOpen] = useState<boolean | null>(null)
   const logOpen = logChoice ?? (isTerminal(run) && describeEnding(run).openLog)
   const [revealLog, setRevealLog] = useState(0)
-  // An ending with nothing to show reads as one column; work in progress keeps its place.
+  // Work in progress keeps its steps beside the work. A finished DEVELOP run reads top to
+  // bottom: what happened, the checks, then the changes. An ending with nothing to show
+  // reads as one column too.
   const beside =
     run.mode === "develop"
-      ? run.changes !== null || !isTerminal(run)
+      ? !isTerminal(run)
       : run.generated_tests !== null || run.generated_code !== null || !isTerminal(run)
 
   useEffect(() => {
@@ -129,11 +131,16 @@ function RunView({ run, connectionError }: { run: Run; connectionError: ApiError
             />
           </div>
         </div>
-        <div className={cn("min-w-0 space-y-12", beside && "lg:col-start-1 lg:row-start-1")}>
+        <div
+          className={cn(
+            "min-w-0 space-y-12",
+            beside ? "lg:col-start-1 lg:row-start-1" : run.mode === "develop" && "max-w-4xl",
+          )}
+        >
           {run.mode === "develop" ? (
             <>
+              <ChecksSection run={run} />
               <ChangesSection run={run} />
-              <VerificationSection run={run} />
             </>
           ) : (
             <>
@@ -154,7 +161,7 @@ function CenteredMessage({ title, children }: { title: string; children: ReactNo
       <h1 className="text-xl font-semibold">{title}</h1>
       <div className="mt-2 text-sm text-muted-foreground">{children}</div>
       <Button asChild className="mt-6">
-        <Link to="/">Start a new run</Link>
+        <Link to="/">Start a new task</Link>
       </Button>
     </main>
   )

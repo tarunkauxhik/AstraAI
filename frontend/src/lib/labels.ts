@@ -30,7 +30,7 @@ export const STAGE_ACTIVITY: Record<RunStage, string> = {
   reviewing: "Reviewing the solution",
   revising_code: "Fixing the solution",
   revising_tests: "Fixing the tests",
-  fetching_repository: "Reading the repository",
+  fetching_repository: "Checking the repository",
   running_existing_tests: "Running the existing tests",
   understanding_task: "Understanding the task",
   making_changes: "Making changes",
@@ -184,6 +184,22 @@ export const FAILURES: Record<KnownErrorCode, FailureCopy> = {
     title: "Repository not supported",
     description: "This repository contains files AstraAi can't safely handle yet, such as symbolic links.",
   },
+  // The preflight: what it found, then what V1 supports.
+  not_python: {
+    kind: "repository",
+    title: "Repository not supported",
+    description: "AstraAi found no Python files in this repository. AstraAi V1 supports public Python repositories whose tests run with pytest without additional dependencies.",
+  },
+  no_pytest_tests: {
+    kind: "repository",
+    title: "Repository not supported",
+    description: "AstraAi couldn't find tests in this repository that pytest would run. AstraAi V1 supports public Python repositories whose tests run with pytest without additional dependencies.",
+  },
+  needs_dependencies: {
+    kind: "repository",
+    title: "Repository not supported",
+    description: "This repository depends on packages that would have to be installed first. AstraAi V1 supports public Python repositories whose tests run with pytest without additional dependencies.",
+  },
   github_unavailable: {
     kind: "service",
     title: "GitHub unavailable",
@@ -201,7 +217,7 @@ export const FAILURES: Record<KnownErrorCode, FailureCopy> = {
   },
   no_changes: {
     kind: "unchanged",
-    title: "No useful changes",
+    title: "No changes made",
     description: "AstraAi didn't find anything to change for this task.",
   },
   changes_not_applied: {
