@@ -611,6 +611,20 @@ export function developOutcome(run: Run): DevelopOutcome | null {
   return after === "passed" ? "ready" : after === "failed" ? "needs_review" : "not_verified"
 }
 
+/**
+ * When the change adds test functions that didn't all run (pytest never collected them, or
+ * the counts couldn't confirm it): why those tests aren't evidence. Null when they ran.
+ */
+export function newTestsNotRun(run: Run): string | null {
+  const declared = run.checks?.declared ?? 0
+  const added = run.checks?.added ?? null
+  if (declared === 0 || (added !== null && added >= declared)) return null
+  const tests = formatCount(declared, "new test")
+  if (added === null) return `AstraAi couldn't confirm that the ${tests} ran.`
+  if (added === 0) return `None of the ${tests} ran: pytest didn't collect them.`
+  return `Only ${added} of the ${tests} ran: pytest didn't collect the rest.`
+}
+
 /** Review verdicts that name a concrete problem; anything else isn't a finding. */
 export function reviewFinding(run: Run): string | null {
   const review = run.critic_result
@@ -645,6 +659,8 @@ function reviewReason(run: Run): string | null {
         : `${formatCount(after.tests_failed ?? 0, "test")} failed after the change.`,
     )
   }
+  const notRun = newTestsNotRun(run)
+  if (notRun) reasons.push(notRun)
   // Failing tests are the reason when there are any; the review's finding stays in the checks.
   const finding = reviewFinding(run)
   if (reasons.length === 0 && finding) reasons.push(`AI review flagged something to check: ${finding}`)

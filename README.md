@@ -204,8 +204,8 @@ and the review second:
 
 | `outcome` | When |
 |---|---|
-| `ready` | The tests ran, nothing fails that didn't before, and the final review raised nothing. |
-| `needs_review` | Tests fail that didn't before, or the final review flagged something to check. |
+| `ready` | The tests ran, nothing fails that didn't before, every test the change added ran, and the final review raised nothing. |
+| `needs_review` | Tests fail that didn't before, tests the change added didn't run (fewer tests ran than the diff adds, by pytest's own counts), or the final review flagged something to check. |
 | `not_verified` | The tests couldn't run (time or memory limit, or no sandbox): never called a failure. |
 | `no_changes` | The model found nothing needs to change; `changes.explanation` says why. |
 

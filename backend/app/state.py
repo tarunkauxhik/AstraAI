@@ -352,6 +352,9 @@ class SuiteComparison(BaseModel):
     fixed: list[str] = []
     # How many more tests there are than before, when both runs counted them.
     added: int | None = None
+    # How many test functions the diff adds to test files, net of any it removes. More of
+    # them than `added` means some never ran: pytest didn't collect them.
+    declared: int = 0
 
 
 class FirstAttempt(BaseModel):

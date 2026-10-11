@@ -558,6 +558,14 @@ export const developBrokeExistingRun = run({
   checks: comparison({ clean: false, broken: ["tests/test_report.py::TestTable::test_columns"] }),
 })
 
+// The pilot's six case: the change adds tests pytest never collected; none of them ran.
+export const developNewTestsNotRunRun = run({
+  ...developChangedRun,
+  verification: { ...EXISTING_TESTS_PASSED, failed_tests: [] },
+  checks: comparison({ added: 0, declared: 4 }),
+  outcome: "needs_review",
+})
+
 export const developReviewFlaggedRun = run({
   ...developChangedRun,
   critic_result: CODE_FINDING,

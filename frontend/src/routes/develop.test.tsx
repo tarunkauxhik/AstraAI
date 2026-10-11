@@ -19,6 +19,7 @@ import {
   developFailingTestsRun,
   developFixingRun,
   developNoChangesNeededRun,
+  developNewTestsNotRunRun,
   developNotAppliedRun,
   developNotPublicRun,
   developRepairedRun,
@@ -344,6 +345,20 @@ describe("changes that need review", () => {
       "AI review — to check: flagged something to check: --json is added after parse_args runs.",
     )
     expect(visibleText()).not.toMatch(/failed/i)
+  })
+})
+
+describe("tests the change added that never ran", () => {
+  it("needs review and says the new tests didn't run, without calling it a failure", async () => {
+    await renderRun(developNewTestsNotRunRun)
+
+    const status = screen.getByRole("region", { name: "Changes need your review" })
+    expect(within(status).getByText("None of the 4 new tests ran: pytest didn't collect them.")).toBeTruthy()
+    expect(checkRow("New tests")?.textContent).toBe(
+      "New tests — to check: None of the 4 new tests ran: pytest didn't collect them.",
+    )
+    expect(checkRow("Existing tests")?.textContent).toBe("Existing tests — 128 passed · none broken")
+    expect(visibleText()).not.toMatch(/failed|4 passed/)
   })
 })
 

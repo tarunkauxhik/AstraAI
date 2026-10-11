@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { Run } from "@/api/types"
 import {
   announcement,
+  newTestsNotRun,
   repairNote,
   describeEnding,
   existingTestsSummary,
@@ -27,6 +28,7 @@ import {
   developRepairFailedRun,
   developRetestingRun,
   developNoChangesNeededRun,
+  developNewTestsNotRunRun,
   developAlreadyFailingRun,
   developBrokeExistingRun,
   developReviewFlaggedRun,
@@ -166,6 +168,26 @@ describe("outcomes", () => {
     expect(describeEnding({ ...developChangedRun, outcome: null, checks: null }).title).toBe(
       "Changes ready for review",
     )
+  })
+})
+
+describe("tests the change added that never ran", () => {
+  it("are the reason the change needs review, never shown as passing", () => {
+    const ending = describeEnding(developNewTestsNotRunRun)
+
+    expect([ending.title, ending.detail]).toEqual([
+      "Changes need your review",
+      "None of the 4 new tests ran: pytest didn't collect them.",
+    ])
+  })
+
+  it.each([
+    [{ added: 1, declared: 4 }, "Only 1 of the 4 new tests ran: pytest didn't collect the rest."],
+    [{ added: null, declared: 2 }, "AstraAi couldn't confirm that the 2 new tests ran."],
+    [{ added: 4, declared: 4 }, null],
+    [{ added: 0, declared: 0 }, null],
+  ])("%j", (counts, reason) => {
+    expect(newTestsNotRun({ ...developChangedRun, checks: comparison(counts) })).toBe(reason)
   })
 })
 

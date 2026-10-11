@@ -223,6 +223,8 @@ export interface SuiteComparison {
   still_failing: string[]
   fixed: string[]
   added: number | null
+  /** How many test functions the diff adds to test files; more than `added` means some never ran. */
+  declared?: number
 }
 
 /** How a DEVELOP run ended, decided by the server: tests first, the AI review second. */

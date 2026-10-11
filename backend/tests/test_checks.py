@@ -166,6 +166,7 @@ def test_without_ids_only_an_all_passing_run_is_clean() -> None:
         "still_failing": [],
         "fixed": [],
         "added": 0,
+        "declared": 1,
     }
     assert not compare_tests(TESTS_PASSED, result(1, None, failed=1), ADDS_TEST).clean
     assert compare_tests(unknown, result(130, []), ADDS_TEST).clean

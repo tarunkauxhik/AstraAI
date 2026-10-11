@@ -9,6 +9,7 @@ import { formatCount } from "@/lib/format"
 import {
   existingTestsSummary,
   isWorking,
+  newTestsNotRun,
   reviewFinding,
   testName,
   verificationOutcome,
@@ -185,8 +186,13 @@ export function ChecksSection({ run }: { run: Run }) {
   }
 
   const added = checks?.added ?? 0
-  const newRow =
-    checks !== null && added > 0 ? (
+  // Tests the change adds that never ran are never shown as passing.
+  const notRun = checks !== null && after !== null ? newTestsNotRun(run) : null
+  const newRow = notRun ? (
+    <CheckRow mark="flag" label="New tests">
+      {notRun}
+    </CheckRow>
+  ) : checks !== null && added > 0 ? (
       checks.new_failing.length > 0 ? (
         <CheckRow mark="problem" label="New tests">
           {added} added · {names(checks.new_failing)} {checks.new_failing.length === 1 ? "fails" : "fail"}

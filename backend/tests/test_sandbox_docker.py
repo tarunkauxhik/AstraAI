@@ -542,3 +542,31 @@ def test_repository_runs_leave_nothing_behind() -> None:
     repository({"test_ok.py": "def test_ok():\n    pass\n"})
 
     assert sandbox_containers() == before
+
+
+@pytest.mark.usefixtures("develop_image")
+def test_tests_added_where_pytest_never_collects_them_are_caught() -> None:
+    """The pilot case, through real pytest: methods added to a class it doesn't collect."""
+    from app.checks import compare_tests, develop_outcome
+    from tests.test_uncollected import (
+        COLLECTED_CHANGE,
+        COLLECTED_FILE,
+        ENSURE_CHANGE,
+        ENSURE_FILE,
+        SIX_LIKE,
+    )
+
+    original = {path: data.decode() for path, data in SIX_LIKE.items()}
+    before = repository(original)
+    uncollected = repository({**original, "test_sixlike.py": ENSURE_FILE})
+    collected = repository({**original, "test_sixlike.py": COLLECTED_FILE})
+
+    # pytest ran exactly the one test function before, and still only that one.
+    assert (before.tests_passed, uncollected.tests_passed) == (1, 1)
+    checks = compare_tests(before, uncollected, ENSURE_CHANGE)
+    assert (checks.added, checks.declared) == (0, 2)
+    assert develop_outcome(ENSURE_CHANGE, uncollected, checks, None) == "needs_review"
+    # Written as functions, the same tests run, and the change can be ready.
+    assert collected.tests_passed == 3
+    checks = compare_tests(before, collected, COLLECTED_CHANGE)
+    assert develop_outcome(COLLECTED_CHANGE, collected, checks, None) == "ready"
