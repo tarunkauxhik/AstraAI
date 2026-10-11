@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import tarfile
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -371,9 +372,27 @@ def test_protected_files_are_never_shown_to_the_model() -> None:
 # Only small results are kept: never the repository's files.
 
 
+# Windows can refuse to read a file while SQLite is writing it: a brief, bounded retry.
+DATA_READ_ATTEMPTS = 20
+DATA_READ_PAUSE_SECONDS = 0.05
+
+
 def data_bytes() -> bytes:
-    """Every byte AstraAi has persisted: both databases and their write-ahead logs."""
-    return b"".join(path.read_bytes() for path in get_settings().data_dir.iterdir())
+    """Every byte AstraAi has persisted: both databases and their write-ahead logs.
+
+    Every file is read whole every time. A file still locked after the last attempt raises:
+    an unreadable database is never mistaken for one without the secret.
+    """
+    for attempt in range(1, DATA_READ_ATTEMPTS + 1):
+        try:
+            return b"".join(
+                path.read_bytes() for path in get_settings().data_dir.iterdir()
+            )
+        except PermissionError:
+            if attempt == DATA_READ_ATTEMPTS:
+                raise
+            time.sleep(DATA_READ_PAUSE_SECONDS)
+    raise AssertionError("unreachable")
 
 
 def test_the_token_and_the_repository_never_reach_state_checkpoints_logs_or_sandbox(
